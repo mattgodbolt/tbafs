@@ -1,0 +1,246 @@
+<html>
+<head>
+<title>RISC OS PRMs: Volume 4: Chapter 75: Squash</title>
+</head>
+<body bgcolor="white" text="black" link="blue" alink="red" vlink="darkblue">
+
+<P><table border="0" cellpadding="0" cellspacing="0" style="border-collapse: collapse" width="663" id="AutoNumber2" height="80">
+<tr><td width="163" height="80" valign="middle"><img src="../../../images/tech_support_sh.gif" alt="RISCOS.com" WIDTH="143" HEIGHT="70"></td>
+    <td width="500" height="80" valign="middle"><h3>www.riscos.com Technical Support:<BR>Programmer's Reference Manual</h3></td>
+</tr><tr>
+<td width="163" height="1" bgcolor="#000000"></td><td width="500" height="1" bgcolor="#000000"></td>
+</tr></table></P><P>&nbsp;</P>
+
+<h1><a name="21197"></a>Squash</h1>
+<hr>
+<dl>
+
+<dt>
+<h2><a name="idx-9585"></a>Introduction and Overview</h2>
+<dd>
+<dl>
+<dd>
+<p><a name="marker-762775"></a>This module provides general compression and decompression facilities of a lossless nature through a SWI interface. The algorithm is 12-bit LZW, however, this may change in future releases.</p>
+<p>The interface is designed to be restartable, so that compression or decompression can occur from a variety of locations. Operations involving file I/O can easily be constructed from the operations provided.</p>
+<p>This module is not available in RISC OS 2.</p>
+<p>The module is used by the Squash application to generate files of type Squash (&amp;FCA). The format of these files is documented in the chapter entitled <A HREF="fileformats.html#27821">Squash files</a>.</p>
+
+<h6><a name="idx-9586"></a>Errors</h6>
+<p>The following errors can be returned by the Squash module:</p>
+<table>
+<tr>
+<th align="left" valign="top">Error number
+<th align="left" valign="top">Error text
+<tr>
+<td align="left" valign="top"><tt>&amp;921</tt>
+<td align="left" valign="top"><tt>Bad address for module Squash</tt><a name="marker-762760"></a>
+<TR>
+<td align="left" valign="top"><tt>&amp;922</tt>
+<td align="left" valign="top"><tt>Bad input for module Squash</tt><a name="marker-762772"></a>
+<tr>
+<td align="left" valign="top"><tt>&amp;923</tt>
+<td align="left" valign="top"><tt>Bad workspace for module Squash</tt><a name="marker-762773"></a>
+<tr>
+<td align="left" valign="top"><tt>&amp;924</tt>
+<td align="left" valign="top"><tt>Bad parameters for module Squash</tt><a name="marker-762774"></a>
+</table>
+</dl>
+
+<dt>
+<h2><a name="idx-9587"></a>SWI calls</h2>
+<dd>
+<dl>
+<dd>
+<hr><h2 align="right"><a name="89446"></a>Squash_Compress<br>(<acronym>SWI</acronym> &amp;42700)</h2>
+<p><a name="marker-762777"></a>Provides general compression of a lossless nature</p>
+
+<dt>
+<h5><a name="idx-9588"></a>On entry</h5>
+<dd>
+<p>R0 = flags:<br>
+<ul>
+<table>
+<TR>
+<td align="left" valign="top" nowrap>bit 0:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> START NEW OPERATION_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> continue existing operation (using existing workspace contents)
+<TR>
+<td align="left" valign="top" nowrap>bit 1:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> END OF THE INPUT_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> more input after this
+<TR>
+<td align="left" valign="top" nowrap>bit 2:
+<td align="left" valign="top">reserved (must be zero)
+<TR>
+<td align="left" valign="top" nowrap>bit 3:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> NO EFFECT_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> return the work space size required and the maximum output size in bytes (all other bits must be 0)
+<TR>
+<td align="left" valign="top" colspan="2">bits 4 - 31 reserved (must be zero)
+</table>
+</ul>
+R1 = input size (-1 <img src="../symbols/entities/8658.png" alt="=&GT;"> do not return maximum output size) - if bit 3 of R0 is set; or workspace pointer - if bit 3 of R0 is clear<br>
+R2 = input pointer, word aligned - if bit 3 of R0 is clear<br><!-- errata -->
+R3 = number of bytes of input available - if bit 3 of R0 is clear<br>
+R4 = output pointer, word aligned - if bit 3 of R0 is clear<br><!-- errata -->
+R5 = number of bytes of output space available - if bit 3 of R0 is clear</p>
+
+<dt>
+<h5><a name="idx-9589"></a>On exit</h5>
+<dd>
+<p>R0 = required work space size - if bit 3 of R0 set on input; else output status - if bit 3 of R0 clear on input:
+<dl>
+<dd>
+0 <img src="../symbols/entities/8658.png" alt="=&GT;"> operation completed<br>
+1 <img src="../symbols/entities/8658.png" alt="=&GT;"> operation ran out of input data (R3 = 0)<br>
+2 <img src="../symbols/entities/8658.png" alt="=&GT;"> operation ran out of output space (R5 &lt; 12)
+</dl>
+R1 = maximum output size (-1 <img src="../symbols/entities/8658.png" alt="=&GT;"> don't know or wasn't asked) - if bit 3 of R0 set on input; else preserved - if bit 3 of R0 clear on input<br>
+R2 updated to show first unused input byte - if bit 3 of R0 clear on input<br>
+R3 updated to show number of input bytes not used - if bit 3 of R0 clear on input<br>
+R4 updated to show first unused output byte - if bit 3 of R0 clear on input<br>
+R5 updated to show number of output bytes not used - if bit 3 of R0 clear on input</p>
+
+<dt>
+<h5><a name="idx-9590"></a>Interrupts</h5>
+<dd>
+<p>Interrupt status is undefined<br>
+Fast interrupts are enabled</p>
+
+<dt>
+<h5><a name="idx-9591"></a>Processor mode</h5>
+<dd>
+<p>Processor is in SVC mode</p>
+
+<dt>
+<h5><a name="idx-9592"></a>Re-entrancy</h5>
+<dd>
+<p>SWI is re-entrant</p>
+
+<dt>
+<h5><a name="idx-9593"></a>Use</h5>
+<dd>
+<p>This call provides general compression of a lossless nature. It acts as a filter on a stream of data. The call returns if either the input or the output is exhausted.</p>
+<p>It is recommended that you use the following facility to determine the maximum output size rather than attempting to calculate it yourself:</p>
+<p>Call the SWI first with bit 3 of R0 set and the input size placed in R1. The maximum output size is then calculated and returned on exit in R1. You can use this value to allocate the required amount of space and call the SWI again setting the registers as appropriate.</p>
+<p>The algorithm used by this module is 12-bit LZW, as used by the UNIX 'compress' command (with -b 12 specified). If future versions of the module use different algorithms, they will still be able to decompress existing compressed data. </p>
+<p>If bits 0 and 1 of R0 are clear, and the output is definitely big enough, a fast algorithm will be used. </p>
+<p>The performance of compression on an 8Mhz A420 with ARM2 is approximately as follows:</p>
+<dl>
+<dd>
+<table>
+<tr>
+<th align="left" valign="top">Store to store
+<th align="left" valign="top">Fast case
+<tr>
+<td align="left" valign="top">24 Kbytes per second
+<td align="left" valign="top">68 Kbytes per second
+</table>
+</dl>
+<p>where <i>Fast case</i> is store to store, with all input present, and with an output buffer large enough to hold all output.</p>
+
+<dt>
+<h5><a name="idx-9594"></a>Related SWIs</h5>
+<dd>
+<p><A HREF="#56995">Squash_Decompress</a></p>
+
+<dt>
+<h5><a name="idx-9595"></a>Related vectors</h5>
+<dd>
+<p>None<a name="marker-762778"></a></p>
+<dd>
+<hr><h2 align="right"><a name="56995"></a>Squash_Decompress<br>(<acronym>SWI</acronym> &amp;42701)</h2>
+<p><a name="marker-762779"></a>Provides general decompression of a lossless nature</p>
+
+<dt>
+<h5><a name="idx-9596"></a>On entry</h5>
+<dd>
+<p>R0 = flags:
+<dl>
+<dd>
+<table>
+<tr>
+<td align="left" valign="top" nowrap>bit 0:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> START NEW OPERATION_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> continue existing operation (using existing workspace contents)
+<tr>
+<td align="left" valign="top" nowrap>bit 1:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> END OF THE INPUT_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> more input after this
+<tr>
+<td align="left" valign="top" nowrap>bit 2:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> NORMAL_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> you may assume that the output will all fit in this buffer (allows a faster algorithm to be used, if bits 0 and 1 are both 0)
+<tr>
+<td align="left" valign="top" nowrap>bit 3:
+<td align="left" valign="top">0 <img src="../symbols/entities/8658.png" alt="=&GT;"> NO EFFECT_ 1 <img src="../symbols/entities/8658.png" alt="=&GT;"> return the work space size required and the maximum output size in bytes (all other bits must be 0)
+<tr>
+<td align="left" valign="top" colspan="2">bits 4 - 31 reserved (must be zero)
+</table>
+</dl>
+R1 = input size (-1 <img src="../symbols/entities/8658.png" alt="=&GT;"> do not return maximum output size) - if bit 3 of R0 is set; or workspace pointer - if bit 3 of R0 is clear<br>
+R2 = input pointer - if bit 3 of R0 is clear<br>
+R3 = number of bytes of input available - if bit 3 of R0 is clear<br>
+R4 = output pointer - if bit 3 of R0 is clear<br>
+R5 = number of bytes of output space available - if bit 3 of R0 is clear</p>
+
+<dt>
+<h5><a name="idx-9597"></a> On exit</h5>
+<dd>
+<p>R0 = required work space size - if bit 3 of R0 set on input; else output status - if bit 3 of R0 clear on input:
+<dl>
+<dd>
+0 <img src="../symbols/entities/8658.png" alt="=&GT;"> operation completed<br>
+1 <img src="../symbols/entities/8658.png" alt="=&GT;"> operation ran out of input data (R3 &lt; 12)<br>
+2 <img src="../symbols/entities/8658.png" alt="=&GT;"> operation ran out of output space (R5 = 0)
+</dl>
+R1 = maximum output size (-1 <img src="../symbols/entities/8658.png" alt="=&GT;"> don't know or wasn't asked) - if bit 3 of R0 set on input; else preserved - if bit 3 of R0 clear on input<br>
+R2 updated to show first unused input byte - if bit 3 of R0 clear on input<br>
+R3 updated to show number of input bytes not used - if bit 3 of R0 clear on input<br>
+R4 updated to show first unused output byte - if bit 3 of R0 clear on input<br>
+R5 updated to show number of output bytes not used - if bit 3 of R0 clear on input</p>
+
+<dt>
+<h5><a name="idx-9598"></a>Interrupts</h5>
+<dd>
+<p>Interrupt status is undefined<br>
+Fast interrupts are enabled</p>
+
+<dt>
+<h5><a name="idx-9599"></a>Processor mode</h5>
+<dd>
+<p>Processor is in SVC mode</p>
+
+<dt>
+<h5><a name="idx-9600"></a>Re-entrancy</h5>
+<dd>
+<p>SWI is re-entrant</p>
+
+<dt>
+<h5><a name="idx-9601"></a>Use</h5>
+<dd>
+<p>This SWI provides general decompression of a lossless nature.</p>
+<p>Note: The current algorithm cannot predict what the size of the decompressed output will be. This means that, currently, -1 is always returned on exit in R1. In future releases this may change; it is therefore recommended that you call the SWI first with bit 3 of R0 set and the input size placed in R1.</p>
+<p>In the case where R3 &lt; 12, the unused input must be resupplied.</p>
+<p>The performance of decompression on an 8Mhz A420 with ARM2 is approximately as follows:</p>
+<dl>
+<dd>
+<table>
+<TR>
+<th align="left" valign="top">Store to store
+<th align="left" valign="top">Fast case
+<tr>
+<td align="left" valign="top">48 Kbytes per second
+<td align="left" valign="top">280 Kbytes per second
+</table>
+</dl>
+<p>where <i>Fast case</i> is store to store, with all input present, and with an output buffer large enough to hold all output.</p>
+
+<dt>
+<h5><a name="idx-9602"></a>Related SWIs</h5>
+<dd>
+<p><A HREF="#89446">Squash_Compress</a></p>
+
+<dt>
+<h5><a name="idx-9603"></a>Related vectors</h5>
+<dd>
+<p>None<a name="marker-762780"></a><a name="marker-762776"></a></p>
+</dl>
+</dl>
+<P><center><small><b>This edition Copyright &copy; 3QD Developments Ltd 2015<br>
+Last Edit: Tue,03 Nov 2015</b></small></center></p>
+</body></html>
