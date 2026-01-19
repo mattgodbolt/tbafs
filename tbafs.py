@@ -8,6 +8,8 @@ This tool can list and extract files from .b21 TBAFS archives.
 The format uses 12-bit LZW compression (identical to Unix compress -b 12).
 """
 
+from __future__ import annotations
+
 import argparse
 import struct
 import sys
@@ -643,14 +645,15 @@ def main() -> int:
         with open(args.archive, "rb") as f:
             archive = TBAFSArchive(f)
 
-            match args.command:
-                case "list" | "l":
-                    archive.list_files(verbose=args.verbose)
-                case "extract" | "x":
+            if args.command in ("list", "l"):
+                archive.list_files(verbose=args.verbose)
+
+            elif args.command in ('extract', 'x'):
                     output_dir = Path(args.output)
                     output_dir.mkdir(parents=True, exist_ok=True)
                     archive.extract_all(output_dir)
-                case "info" | "i":
+
+            elif args.command in ('info', 'i'):
                     print(f"Magic: {archive.header.magic}")
                     print(f"Root allocation: {archive.header.root_alloc}")
                     print(f"First entry offset: 0x{archive.header.first_entry_offset:X}")
