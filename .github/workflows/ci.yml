@@ -50,3 +50,12 @@ jobs:
             echo
             echo +++ Smoketest: Info
             ./tbafs.py info samples/Blurp.b21
+
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.9
+      - uses: pre-commit/action@v3.0.1
