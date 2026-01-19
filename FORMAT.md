@@ -108,9 +108,20 @@ Large files are split into 32KB (32768 byte) blocks:
 3. Concatenate decompressed blocks to reconstruct the file
 4. Final block may be smaller than 32KB
 
+## Key Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `HEADER_SIZE` | 0x90 (144) | Size of the main TBAFS header |
+| `ROOT_DIR_RESERVED` | 0x80 (128) | Reserved block after header (zeros) |
+| `ROOT_ENTRIES_OFFSET` | 0x110 (272) | Where root entries begin (HEADER_SIZE + ROOT_DIR_RESERVED) |
+| `ENTRY_SIZE` | 0x40 (64) | Size of each directory entry |
+| `BLOCK_ALIGNMENT` | 16 | Alignment boundary for entries and data blocks |
+| `LZW_BLOCK_SIZE` | 32768 | Maximum decompressed size per LZW block |
+
 ## Directory Structure
 
-- Root directory entries start at `dir_header_size + 0x80` (typically 0x110)
+- Root directory entries start at `dir_header_size + ROOT_DIR_RESERVED` (typically 0x110)
 - Subdirectory entries are located after the parent directory's data blocks
 - Scan forward from directory data_offset to find entries (may be 64KB+ ahead)
 - Entries are 16-byte aligned (not 64-byte aligned from directory start)

@@ -11,10 +11,32 @@ The format uses 12-bit LZW compression (identical to Unix compress -b 12).
 import argparse
 import struct
 import sys
-import os
 from dataclasses import dataclass
 from typing import BinaryIO, Iterator
 from pathlib import Path
+
+# Archive structure constants
+TBAFS_MAGIC = b"TAFS"
+HEADER_SIZE = 0x90              # 144 bytes - main TBAFS header
+ROOT_DIR_RESERVED = 0x80        # 128 bytes - reserved block after header
+ROOT_ENTRIES_OFFSET = HEADER_SIZE + ROOT_DIR_RESERVED  # 0x110
+ENTRY_SIZE = 0x40               # 64 bytes per directory entry
+BLOCK_ALIGNMENT = 16            # Entries/blocks aligned to 16 bytes
+LZW_BLOCK_SIZE = 32768          # 32KB decompressed blocks for large files
+
+# LZW compression constants
+LZW_MAGIC = b"\x1f\x9d"
+LZW_MAX_BITS = 12
+LZW_CLEAR_CODE = 256
+LZW_INITIAL_BITS = 9
+
+# Entry type constants
+ENTRY_TYPE_FILE = 1
+ENTRY_TYPE_DIR = 2
+ENTRY_TYPE_END = 0xFFFFFFFF
+
+# Compression flags
+FLAGS_COMPRESSED = 3
 
 
 # RISC OS filetype names for common types
@@ -46,6 +68,26 @@ FILETYPES = {
     0x695: "GIF",
     0x004: "UnkData",  # Unknown data type often seen
 }
+
+
+def align_to(offset: int, alignment: int = BLOCK_ALIGNMENT) -> int:
+    """Round offset up to next alignment boundary."""
+    return (offset + alignment - 1) & ~(alignment - 1)
+
+
+def _create_initial_dictionary() -> dict[int, bytes]:
+    """Create initial LZW dictionary with single-byte codes 0-255."""
+    return {i: bytes([i]) for i in range(256)}
+
+
+class TBAFSExtractionError(Exception):
+    """Raised when file data cannot be extracted."""
+    pass
+
+
+# Pre-compiled struct formats for header and entry parsing
+HEADER_STRUCT = struct.Struct("<4I")  # root_alloc, unknown1, dir_header_size, reserved
+ENTRY_STRUCT = struct.Struct("<6I")   # data_offset, type, load, exec, size, flags
 
 
 @dataclass
@@ -89,19 +131,19 @@ class DirEntry:
 
     @property
     def is_file(self) -> bool:
-        return self.entry_type == 1
+        return self.entry_type == ENTRY_TYPE_FILE
 
     @property
     def is_directory(self) -> bool:
-        return self.entry_type == 2
+        return self.entry_type == ENTRY_TYPE_DIR
 
     @property
     def is_end(self) -> bool:
-        return self.entry_type == 0xFFFFFFFF
+        return self.entry_type == ENTRY_TYPE_END
 
     @property
     def is_compressed(self) -> bool:
-        return self.flags == 3
+        return self.flags == FLAGS_COMPRESSED
 
     @property
     def full_path(self) -> str:
@@ -119,10 +161,10 @@ class LZWDecompressor:
     a flags byte (0x8C = block mode + 12 bits max).
     """
 
-    def __init__(self, max_bits: int = 12):
+    def __init__(self, max_bits: int = LZW_MAX_BITS):
         self.max_bits = max_bits
         self.max_code = (1 << max_bits) - 1
-        self.clear_code = 256  # Code to reset dictionary
+        self.clear_code = LZW_CLEAR_CODE
 
     def decompress(self, data: bytes) -> bytes:
         """Decompress LZW data."""
@@ -130,7 +172,7 @@ class LZWDecompressor:
             raise ValueError("Data too short for LZW")
 
         # Check magic
-        if data[0] != 0x1F or data[1] != 0x9D:
+        if data[:2] != LZW_MAGIC:
             raise ValueError(f"Invalid LZW magic: {data[0]:02X} {data[1]:02X}")
 
         flags = data[2]
@@ -141,17 +183,17 @@ class LZWDecompressor:
             raise ValueError(f"Unsupported max bits: {max_bits}")
 
         # Initialize dictionary with single-byte codes
-        dictionary = {i: bytes([i]) for i in range(256)}
+        dictionary = _create_initial_dictionary()
         if block_mode:
-            next_code = 257  # 256 is clear code
+            next_code = LZW_CLEAR_CODE + 1  # 256 is clear code
         else:
-            next_code = 256
+            next_code = LZW_CLEAR_CODE
 
         # Bit reading state
         bit_buffer = 0
         bits_in_buffer = 0
         data_pos = 3
-        current_bits = 9  # Start with 9-bit codes
+        current_bits = LZW_INITIAL_BITS
 
         output = bytearray()
         prev_string = b""
@@ -173,9 +215,9 @@ class LZWDecompressor:
 
             # Handle clear code
             if block_mode and code == self.clear_code:
-                dictionary = {i: bytes([i]) for i in range(256)}
-                next_code = 257
-                current_bits = 9
+                dictionary = _create_initial_dictionary()
+                next_code = LZW_CLEAR_CODE + 1
+                current_bits = LZW_INITIAL_BITS
                 prev_string = b""
                 continue
 
@@ -214,14 +256,12 @@ class LZWDecompressor:
 class TBAFSArchive:
     """TBAFS archive reader."""
 
-    MAGIC = b"TAFS"
-    ENTRY_SIZE = 0x40  # 64 bytes per directory entry
-
     def __init__(self, file: BinaryIO):
         self.file = file
         self.data = file.read()
         self.header = self._parse_header()
         self.decompressor = LZWDecompressor()
+        self._block_index: dict[int, tuple[int, int]] | None = None
 
     def _parse_header(self) -> TBAFSHeader:
         """Parse the TBAFS header."""
@@ -229,34 +269,36 @@ class TBAFSArchive:
             raise ValueError("File too small for TBAFS header")
 
         magic = self.data[0:4]
-        if magic != self.MAGIC:
-            raise ValueError(f"Invalid magic: {magic!r}, expected {self.MAGIC!r}")
+        if magic != TBAFS_MAGIC:
+            raise ValueError(f"Invalid magic: {magic!r}, expected {TBAFS_MAGIC!r}")
+
+        root_alloc, unknown1, dir_header_size, _ = HEADER_STRUCT.unpack(
+            self.data[4:20]
+        )
+        first_entry_offset, entry_count = struct.unpack("<II", self.data[24:32])
 
         return TBAFSHeader(
             magic=magic.decode("ascii"),
-            root_alloc=struct.unpack("<I", self.data[4:8])[0],
-            unknown1=struct.unpack("<I", self.data[8:12])[0],
-            dir_header_size=struct.unpack("<I", self.data[12:16])[0],
-            first_entry_offset=struct.unpack("<I", self.data[24:28])[0],
-            entry_count=struct.unpack("<I", self.data[28:32])[0],
+            root_alloc=root_alloc,
+            unknown1=unknown1,
+            dir_header_size=dir_header_size,
+            first_entry_offset=first_entry_offset,
+            entry_count=entry_count,
         )
 
     def _parse_entry(self, offset: int, parent_path: str = "") -> DirEntry | None:
         """Parse a single directory entry at the given offset."""
-        if offset + self.ENTRY_SIZE > len(self.data):
+        if offset + ENTRY_SIZE > len(self.data):
             return None
 
-        entry = self.data[offset:offset + self.ENTRY_SIZE]
+        entry_data = self.data[offset:offset + ENTRY_SIZE]
 
-        data_offset = struct.unpack("<I", entry[0:4])[0]
-        entry_type = struct.unpack("<I", entry[4:8])[0]
-        load_addr = struct.unpack("<I", entry[8:12])[0]
-        exec_addr = struct.unpack("<I", entry[12:16])[0]
-        size = struct.unpack("<I", entry[16:20])[0]
-        flags = struct.unpack("<I", entry[20:24])[0]
+        data_offset, entry_type, load_addr, exec_addr, size, flags = (
+            ENTRY_STRUCT.unpack(entry_data[:24])
+        )
 
         # Extract null-terminated name
-        name_bytes = entry[24:48]
+        name_bytes = entry_data[24:48]
         null_pos = name_bytes.find(b"\x00")
         if null_pos != -1:
             name_bytes = name_bytes[:null_pos]
@@ -278,7 +320,7 @@ class TBAFSArchive:
         """Check if an entry looks valid."""
         if not entry:
             return False
-        if entry.entry_type not in [1, 2]:
+        if entry.entry_type not in (ENTRY_TYPE_FILE, ENTRY_TYPE_DIR):
             return False
         if not entry.name or len(entry.name) < 1:
             return False
@@ -299,21 +341,21 @@ class TBAFSArchive:
         compressed file data.
         """
         entries = []
-        pos = (start + 15) // 16 * 16  # Align to 16 bytes
+        pos = align_to(start)
 
-        while pos < end and pos + self.ENTRY_SIZE <= len(self.data):
+        while pos < end and pos + ENTRY_SIZE <= len(self.data):
             entry = self._parse_entry(pos, parent_path)
 
-            if entry and entry.entry_type == 0xFFFFFFFF:
+            if entry and entry.entry_type == ENTRY_TYPE_END:
                 # End marker - skip past it
-                pos += 0x10
+                pos += BLOCK_ALIGNMENT
                 continue
 
             if self._is_valid_entry(entry):
                 entries.append(entry)
-                pos += self.ENTRY_SIZE  # Move past this 64-byte entry
+                pos += ENTRY_SIZE  # Move past this 64-byte entry
             else:
-                pos += 0x10  # Scan at 16-byte intervals
+                pos += BLOCK_ALIGNMENT  # Scan at 16-byte intervals
 
         return entries
 
@@ -334,12 +376,12 @@ class TBAFSArchive:
                 break
             if self._is_valid_entry(entry) and entry.is_directory:
                 directories.append((entry.data_offset, entry.name))
-            offset += self.ENTRY_SIZE
+            offset += ENTRY_SIZE
 
         # Now recursively find subdirectories within each top-level directory
         # We'll scan all directory ranges
         found_dirs = list(directories)  # Start with top-level dirs
-        processed = set()
+        processed: set[int] = set()
 
         while found_dirs:
             data_offset, path = found_dirs.pop(0)
@@ -349,12 +391,12 @@ class TBAFSArchive:
 
             # Scan from this directory's offset to end of file
             # We'll find more subdirectories here
-            pos = (data_offset + 15) // 16 * 16
-            while pos < len(self.data) - self.ENTRY_SIZE:
+            pos = align_to(data_offset)
+            while pos < len(self.data) - ENTRY_SIZE:
                 entry = self._parse_entry(pos, path)
 
-                if entry and entry.entry_type == 0xFFFFFFFF:
-                    pos += 0x10
+                if entry and entry.entry_type == ENTRY_TYPE_END:
+                    pos += BLOCK_ALIGNMENT
                     continue
 
                 if self._is_valid_entry(entry):
@@ -362,9 +404,9 @@ class TBAFSArchive:
                         full_path = f"{path}/{entry.name}" if path else entry.name
                         directories.append((entry.data_offset, full_path))
                         found_dirs.append((entry.data_offset, full_path))
-                    pos += self.ENTRY_SIZE
+                    pos += ENTRY_SIZE
                 else:
-                    pos += 0x10
+                    pos += BLOCK_ALIGNMENT
 
         return directories
 
@@ -372,8 +414,8 @@ class TBAFSArchive:
                      global_boundaries: list[int] | None = None) -> Iterator[DirEntry]:
         """Iterate over all directory entries, recursively."""
         if dir_offset is None:
-            # Root directory: entries start at dir_header_size + 0x80
-            start_offset = self.header.dir_header_size + 0x80
+            # Root directory: entries start at dir_header_size + ROOT_DIR_RESERVED
+            start_offset = self.header.dir_header_size + ROOT_DIR_RESERVED
 
             # First pass: collect ALL directories globally to establish boundaries
             all_dirs = self._collect_all_directories(start_offset)
@@ -389,7 +431,7 @@ class TBAFSArchive:
                     break
                 if self._is_valid_entry(entry):
                     root_entries.append(entry)
-                offset += self.ENTRY_SIZE
+                offset += ENTRY_SIZE
 
             # Yield root entries and recurse into directories
             for entry in root_entries:
@@ -423,10 +465,10 @@ class TBAFSArchive:
 
         Returns a dict mapping decompressed_size -> (header_offset, compressed_size)
         """
-        blocks = {}
+        blocks: dict[int, tuple[int, int]] = {}
         pos = 0
         while True:
-            pos = self.data.find(b"\x1f\x9d", pos)
+            pos = self.data.find(LZW_MAGIC, pos)
             if pos == -1:
                 break
 
@@ -457,7 +499,7 @@ class TBAFSArchive:
 
         while len(result) < target_size and block + 14 <= len(self.data):
             # Check for LZW magic
-            if self.data[block + 12:block + 14] != b"\x1f\x9d":
+            if self.data[block + 12:block + 14] != LZW_MAGIC:
                 break
 
             comp_size = struct.unpack("<I", self.data[block + 8:block + 12])[0]
@@ -473,9 +515,9 @@ class TBAFSArchive:
             except Exception:
                 break
 
-            # Next block is 16-byte aligned after this one
+            # Next block is aligned after this one
             end = block + 12 + comp_size
-            block = (end + 15) // 16 * 16
+            block = align_to(end)
 
         # Trim to exact size
         return bytes(result[:target_size])
@@ -490,13 +532,13 @@ class TBAFSArchive:
         # Primary method: data_offset - 4 points to block header
         header_offset = entry.data_offset - 4
         if header_offset >= 0 and header_offset + 14 <= len(self.data):
-            if self.data[header_offset + 12:header_offset + 14] == b"\x1f\x9d":
+            if self.data[header_offset + 12:header_offset + 14] == LZW_MAGIC:
                 result = self._read_blocks_from(header_offset, target_size)
                 if len(result) == target_size:
                     return result
 
         # Fallback: build block index and match by size
-        if not hasattr(self, "_block_index"):
+        if self._block_index is None:
             self._block_index = self._build_block_index()
 
         if target_size in self._block_index:
@@ -509,7 +551,7 @@ class TBAFSArchive:
         # Last resort: scan for matching decompressed size
         pos = 0
         while True:
-            pos = self.data.find(b"\x1f\x9d", pos)
+            pos = self.data.find(LZW_MAGIC, pos)
             if pos == -1:
                 break
             header = pos - 12
@@ -519,7 +561,7 @@ class TBAFSArchive:
                     return result
             pos += 1
 
-        return b""  # Could not extract
+        raise TBAFSExtractionError(f"Could not locate data for {entry.full_path}")
 
     def list_files(self, verbose: bool = False) -> None:
         """List all files in the archive."""
@@ -555,7 +597,7 @@ class TBAFSArchive:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="TBAFS Archive Extractor for RISC OS .b21 archives"
     )
@@ -585,22 +627,26 @@ def main():
         with open(args.archive, "rb") as f:
             archive = TBAFSArchive(f)
 
-            if args.command in ("list", "l"):
-                archive.list_files(verbose=args.verbose)
-            elif args.command in ("extract", "x"):
-                output_dir = Path(args.output)
-                output_dir.mkdir(parents=True, exist_ok=True)
-                archive.extract_all(output_dir)
-            elif args.command in ("info", "i"):
-                print(f"Magic: {archive.header.magic}")
-                print(f"Root allocation: {archive.header.root_alloc}")
-                print(f"First entry offset: 0x{archive.header.first_entry_offset:X}")
-                print(f"Entry count: {archive.header.entry_count}")
+            match args.command:
+                case "list" | "l":
+                    archive.list_files(verbose=args.verbose)
+                case "extract" | "x":
+                    output_dir = Path(args.output)
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    archive.extract_all(output_dir)
+                case "info" | "i":
+                    print(f"Magic: {archive.header.magic}")
+                    print(f"Root allocation: {archive.header.root_alloc}")
+                    print(f"First entry offset: 0x{archive.header.first_entry_offset:X}")
+                    print(f"Entry count: {archive.header.entry_count}")
 
-                file_count = sum(1 for e in archive.iter_entries() if e.is_file)
-                dir_count = sum(1 for e in archive.iter_entries() if e.is_directory)
-                print(f"Files: {file_count}")
-                print(f"Directories: {dir_count}")
+                    # Single-pass counting
+                    files, dirs = 0, 0
+                    for e in archive.iter_entries():
+                        files += e.is_file
+                        dirs += e.is_directory
+                    print(f"Files: {files}")
+                    print(f"Directories: {dirs}")
 
     except FileNotFoundError:
         print(f"Error: File not found: {args.archive}", file=sys.stderr)

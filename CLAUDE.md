@@ -41,7 +41,8 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 
 ```
 tbafs/
-├── tbafs.py          # Main extractor (Python)
+├── tbafs.py          # Main extractor (Python 3.10+)
+├── test.sh           # Reproducible test script (verifies MD5)
 ├── FORMAT.md         # Full format specification
 ├── README.md         # User documentation
 ├── LICENSE           # MIT License
@@ -57,6 +58,7 @@ tbafs/
 ## Testing
 
 ```bash
+./test.sh                                        # Reproducible extraction test (verifies MD5)
 python3 tbafs.py list -v samples/Blurp.b21      # List contents
 python3 tbafs.py extract samples/Blurp.b21 -o tmp/extracted
 find tmp/extracted -type f | wc -l              # Count files (should be 49)
