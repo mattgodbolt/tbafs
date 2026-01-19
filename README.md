@@ -35,6 +35,16 @@ python3 tbafs.py list -v samples/Blurp.b21
 python3 tbafs.py extract samples/Blurp.b21 -o output/
 ```
 
+### Extract to ADFS floppy image
+
+Create an ADFS E format (800KB) floppy disc image loadable in RISC OS emulators:
+
+```bash
+python3 tbafs.py extract samples/Blurp.b21 --adfs blurp.adf
+```
+
+The resulting `.adf` file can be loaded directly in emulators like RPCEmu or Arculator. Files retain their original RISC OS filetypes and timestamps.
+
 ### Show archive info
 
 ```bash
@@ -71,7 +81,8 @@ Key features:
 ## Limitations
 
 - Extraction only (cannot create archives)
-- RISC OS timestamps in archives are not preserved on extraction
+- RISC OS timestamps are not preserved when extracting to filesystem (use `--adfs` to preserve them)
+- ADFS images are limited to 800KB (E format)
 
 ## RISC OS Filetypes
 

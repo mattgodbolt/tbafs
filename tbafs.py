@@ -608,6 +608,32 @@ class TBAFSArchive:
                 except (TBAFSExtractionError, ValueError, struct.error) as e:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)
 
+    def extract_to_adfs(self, output_file: Path) -> None:
+        """Extract all files to an ADFS disc image."""
+        from adfs import ADFSImage
+
+        image = ADFSImage(disc_name="TBAFS")
+
+        for entry in self.iter_entries():
+            if entry.is_directory:
+                image.add_directory(entry.full_path)
+                print(f"Created: {entry.full_path}/")
+            elif entry.is_file:
+                try:
+                    data = self.read_file_data(entry)
+                    image.add_file(
+                        entry.full_path,
+                        data,
+                        entry.load_addr,
+                        entry.exec_addr,
+                    )
+                    print(f"Added: {entry.full_path} ({len(data)} bytes)")
+                except (TBAFSExtractionError, ValueError, struct.error) as e:
+                    print(f"Error adding {entry.full_path}: {e}", file=sys.stderr)
+
+        image.write(output_file)
+        print(f"\nWrote ADFS image: {output_file} ({output_file.stat().st_size} bytes)")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -628,6 +654,11 @@ def main() -> int:
     )
     extract_parser.add_argument("archive", help="Path to .b21 archive")
     extract_parser.add_argument("-o", "--output", default=".", help="Output directory")
+    extract_parser.add_argument(
+        "--adfs",
+        metavar="FILE.adf",
+        help="Output to ADFS E format floppy image instead of filesystem",
+    )
 
     # Info command
     info_parser = subparsers.add_parser("info", aliases=["i"], help="Show archive information")
@@ -647,9 +678,12 @@ def main() -> int:
                 case "list" | "l":
                     archive.list_files(verbose=args.verbose)
                 case "extract" | "x":
-                    output_dir = Path(args.output)
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    archive.extract_all(output_dir)
+                    if args.adfs:
+                        archive.extract_to_adfs(Path(args.adfs))
+                    else:
+                        output_dir = Path(args.output)
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        archive.extract_all(output_dir)
                 case "info" | "i":
                     print(f"Magic: {archive.header.magic}")
                     print(f"Root allocation: {archive.header.root_alloc}")

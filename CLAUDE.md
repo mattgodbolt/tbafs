@@ -42,8 +42,9 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 ```
 tbafs/
 ├── tbafs.py          # Main extractor (Python 3.10+)
+├── adfs.py           # ADFS E format disc image creator
 ├── test.sh           # Reproducible test script (verifies MD5)
-├── FORMAT.md         # Full format specification
+├── FORMAT.md         # Full format specification (TBAFS)
 ├── README.md         # User documentation
 ├── LICENSE           # MIT License
 ├── CLAUDE.md         # This file
@@ -55,6 +56,20 @@ tbafs/
     └── squash.html   # RISC OS Squash docs
 ```
 
+## ADFS Image Creator (adfs.py)
+
+Creates ADFS E format (800KB) floppy disc images compatible with RISC OS emulators.
+
+### Key Implementation Details
+
+- **Format**: ADFS E (NewDir) - 800KB, 1024-byte sectors
+- **Directory format**: NewDir ("Nick" signature) - NOT OldDir ("Hugo")
+- **Filename encoding**: CR terminator (0x0D) for names < 10 chars; full 10-char names have no terminator
+  - Correct: `!Blurp\x0d` (CR terminated)
+  - Wrong: `!Blurð` (top-bit on last char = OldDir format)
+- **Map format**: New map with zone 0 duplicated at sectors 0 and 1
+- **Root directory**: Sector 2 (offset 0x800)
+
 ## Testing
 
 ```bash
@@ -63,6 +78,12 @@ python3 tbafs.py list -v samples/Blurp.b21      # List contents
 python3 tbafs.py extract samples/Blurp.b21 -o tmp/extracted
 find tmp/extracted -type f | wc -l              # Count files (should be 49)
 ```
+
+## Claude Code Preferences
+
+- **Do NOT use `python3 -c '...'`** - Write test scripts to `./tmp/` and run those instead
+- Use `./tmp/` for all temporary files and test outputs
+- Use virtual environments for any pip installs (e.g., `./tmp/venv/`)
 
 ## References
 
