@@ -1,0 +1,52 @@
+##
+# Simple CI smoketests, just to show we've not broken things.
+#
+
+name: CI
+
+
+# Controls when the action will run. Triggers the workflow on:
+#   * push on any branch.
+#   * tag creation for tags beginning with a 'v'
+#   * pull requests
+on:
+  push:
+    branches: ["*"]
+    tags: ["v*"]
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: ["*"]
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python (minimum version)
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3.9
+
+      - name: Smoketests
+        run: |
+            set -e
+
+            echo
+            echo +++ Smoketest: Help message
+            ./tbafs.py --help
+
+            echo
+            echo +++ Smoketest: List archive
+            ./tbafs.py list -v samples/Blurp.b21
+
+            echo
+            echo +++ Smoketest: Extract files
+            ./tbafs.py extract -o out-plain samples/Blurp.b21
+            if [ ! -f 'out-plain/!Blurp/!Run,feb' ] ; then echo FAIL extract ; false ; fi
+
+            echo
+            echo +++ Smoketest: Info
+            ./tbafs.py info samples/Blurp.b21
