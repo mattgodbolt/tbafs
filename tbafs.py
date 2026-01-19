@@ -8,6 +8,8 @@ This tool can list and extract files from .b21 TBAFS archives.
 The format uses 12-bit LZW compression (identical to Unix compress -b 12).
 """
 
+from __future__ import annotations
+
 import argparse
 import struct
 import sys
@@ -632,29 +634,30 @@ def main() -> int:
         with open(args.archive, "rb") as f:
             archive = TBAFSArchive(f)
 
-            match args.command:
-                case "list" | "l":
-                    archive.list_files(verbose=args.verbose)
-                case "extract" | "x":
-                    if args.adfs:
-                        archive.extract_to_adfs(Path(args.adfs))
-                    else:
-                        output_dir = Path(args.output)
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        archive.extract_all(output_dir)
-                case "info" | "i":
-                    print(f"Magic: {archive.header.magic}")
-                    print(f"Root allocation: {archive.header.root_alloc}")
-                    print(f"Entry table offset: 0x{archive.header.entry_table_offset:X}")
-                    print(f"Entry count: {archive.header.entry_count}")
+            if args.command in ("list", "l"):
+                archive.list_files(verbose=args.verbose)
 
-                    # Single-pass counting
-                    files, dirs = 0, 0
-                    for e in archive.iter_entries():
-                        files += e.is_file
-                        dirs += e.is_directory
-                    print(f"Files: {files}")
-                    print(f"Directories: {dirs}")
+            elif args.command in ("extract", "x"):
+                if args.adfs:
+                    archive.extract_to_adfs(Path(args.adfs))
+                else:
+                    output_dir = Path(args.output)
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    archive.extract_all(output_dir)
+
+            elif args.command in ("info", "i"):
+                print(f"Magic: {archive.header.magic}")
+                print(f"Root allocation: {archive.header.root_alloc}")
+                print(f"Entry table offset: 0x{archive.header.entry_table_offset:X}")
+                print(f"Entry count: {archive.header.entry_count}")
+
+                # Single-pass counting
+                files, dirs = 0, 0
+                for e in archive.iter_entries():
+                    files += e.is_file
+                    dirs += e.is_directory
+                print(f"Files: {files}")
+                print(f"Directories: {dirs}")
 
     except FileNotFoundError:
         print(f"Error: File not found: {args.archive}", file=sys.stderr)
