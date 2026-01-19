@@ -8,10 +8,10 @@ TBAFS (TBA Filing System) was created by TBA Software as a high-performance arch
 
 ## Installation
 
-Requires Python 3.10+. No external dependencies.
+Requires Python 3.9+. No external dependencies.
 
 ```bash
-git clone https://github.com/yourusername/tbafs.git
+git clone https://github.com/mattgodbolt/tbafs.git
 cd tbafs
 ```
 
@@ -35,11 +35,24 @@ python3 tbafs.py list -v samples/Blurp.b21
 python3 tbafs.py extract samples/Blurp.b21 -o output/
 ```
 
+To extract with `,xxx` suffixes on filenames, use:
+
+```bash
+python3 tbafs.py extract samples/Blurp.b21 -o output/ --types
+```
+
 ### Show archive info
 
 ```bash
 python3 tbafs.py info samples/Blurp.b21
 ```
+
+### Create *SetTypes script
+
+```bash
+python3 tbafs.py types samples/Blurp.b21
+```
+
 
 ## Example Output
 
