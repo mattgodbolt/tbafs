@@ -79,13 +79,15 @@ Common filetypes you may encounter:
 
 | Code | Name | Description |
 |------|------|-------------|
-| FFF | Text | Plain text |
-| FFE | Command | RISC OS command file |
-| FFD | Data | Generic data |
-| FF9 | Sprite | RISC OS sprite image |
-| FF8 | Absolute | Executable program |
-| FFA | Module | RISC OS module |
 | FEB | Obey | Script file |
+| FF8 | Absolute | Executable program |
+| FF9 | Sprite | RISC OS sprite image |
+| FFA | Module | RISC OS module |
+| FFB | BASIC | BBC BASIC program |
+| FFD | Data | Generic data |
+| FFF | Text | Plain text |
+
+Run `python3 tbafs.py list -v <archive>` to see filetypes for all files in an archive.
 
 ## License
 

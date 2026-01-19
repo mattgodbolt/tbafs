@@ -11,9 +11,11 @@ The format uses 12-bit LZW compression (identical to Unix compress -b 12).
 import argparse
 import struct
 import sys
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import BinaryIO, Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 # Archive structure constants
 TBAFS_MAGIC = b"TAFS"
@@ -29,6 +31,7 @@ LZW_MAGIC = b"\x1f\x9d"
 LZW_MAX_BITS = 12
 LZW_CLEAR_CODE = 256
 LZW_INITIAL_BITS = 9
+MAX_COMPRESSED_SIZE = 500_000  # Sanity check limit for compressed block size
 
 # Entry type constants
 ENTRY_TYPE_FILE = 1
@@ -187,10 +190,7 @@ class LZWDecompressor:
 
         # Initialize dictionary with single-byte codes
         dictionary = _create_initial_dictionary()
-        if block_mode:
-            next_code = LZW_CLEAR_CODE + 1  # 256 is clear code
-        else:
-            next_code = LZW_CLEAR_CODE
+        next_code = LZW_CLEAR_CODE + 1 if block_mode else LZW_CLEAR_CODE
 
         # Bit reading state
         bit_buffer = 0
@@ -294,8 +294,8 @@ class TBAFSArchive:
 
         entry_data = self.data[offset : offset + ENTRY_SIZE]
 
-        data_offset, entry_type, load_addr, exec_addr, size, flags = (
-            ENTRY_STRUCT.unpack(entry_data[:24])
+        data_offset, entry_type, load_addr, exec_addr, size, flags = ENTRY_STRUCT.unpack(
+            entry_data[:24]
         )
 
         # Extract null-terminated name
@@ -329,9 +329,7 @@ class TBAFSArchive:
         if not (entry.name[0].isalnum() or entry.name[0] in "!_"):
             return False
         # Load address should be RISC OS format
-        if (entry.load_addr >> 20) != 0xFFF:
-            return False
-        return True
+        return (entry.load_addr >> 20) == 0xFFF
 
     def _find_all_entries_in_range(
         self, start: int, end: int, parent_path: str = ""
@@ -354,8 +352,7 @@ class TBAFSArchive:
                 pos += BLOCK_ALIGNMENT
                 continue
 
-            if self._is_valid_entry(entry):
-                assert entry is not None
+            if self._is_valid_entry(entry) and entry is not None:
                 entries.append(entry)
                 pos += ENTRY_SIZE  # Move past this 64-byte entry
             else:
@@ -384,11 +381,11 @@ class TBAFSArchive:
 
         # Now recursively find subdirectories within each top-level directory
         # We'll scan all directory ranges
-        found_dirs = list(directories)  # Start with top-level dirs
+        found_dirs: deque[tuple[int, str]] = deque(directories)
         processed: set[int] = set()
 
         while found_dirs:
-            data_offset, path = found_dirs.pop(0)
+            data_offset, path = found_dirs.popleft()
             if data_offset in processed:
                 continue
             processed.add(data_offset)
@@ -403,8 +400,7 @@ class TBAFSArchive:
                     pos += BLOCK_ALIGNMENT
                     continue
 
-                if self._is_valid_entry(entry):
-                    assert entry is not None
+                if self._is_valid_entry(entry) and entry is not None:
                     if entry.is_directory:
                         full_path = f"{path}/{entry.name}" if path else entry.name
                         directories.append((entry.data_offset, full_path))
@@ -428,7 +424,7 @@ class TBAFSArchive:
 
             # First pass: collect ALL directories globally to establish boundaries
             all_dirs = self._collect_all_directories(start_offset)
-            all_dir_offsets = sorted(set(d[0] for d in all_dirs))
+            all_dir_offsets = sorted({d[0] for d in all_dirs})
             all_dir_offsets.append(len(self.data))  # Add EOF as final boundary
 
             # Collect root entries (fixed positions)
@@ -487,10 +483,8 @@ class TBAFSArchive:
 
             header_start = pos - 12
             if header_start >= 0:
-                comp_size = struct.unpack(
-                    "<I", self.data[header_start + 8 : header_start + 12]
-                )[0]
-                if 0 < comp_size < 500000:  # Sanity check
+                comp_size = struct.unpack("<I", self.data[header_start + 8 : header_start + 12])[0]
+                if 0 < comp_size < MAX_COMPRESSED_SIZE:
                     compressed_data = self.data[pos : pos + comp_size]
                     try:
                         decompressed = self.decompressor.decompress(compressed_data)
@@ -498,7 +492,7 @@ class TBAFSArchive:
                         # Store by size (may have collisions, but first match wins)
                         if actual_size not in blocks:
                             blocks[actual_size] = (header_start, comp_size)
-                    except Exception:
+                    except (ValueError, struct.error):
                         pass
             pos += 1
         return blocks
@@ -518,7 +512,7 @@ class TBAFSArchive:
                 break
 
             comp_size = struct.unpack("<I", self.data[block + 8 : block + 12])[0]
-            if comp_size == 0 or comp_size > 500000:
+            if comp_size == 0 or comp_size > MAX_COMPRESSED_SIZE:
                 break
 
             lzw_start = block + 12
@@ -527,7 +521,7 @@ class TBAFSArchive:
             try:
                 decompressed = self.decompressor.decompress(compressed_data)
                 result.extend(decompressed)
-            except Exception:
+            except (ValueError, struct.error):
                 break
 
             # Next block is aligned after this one
@@ -546,11 +540,14 @@ class TBAFSArchive:
 
         # Primary method: data_offset - 4 points to block header
         header_offset = entry.data_offset - 4
-        if header_offset >= 0 and header_offset + 14 <= len(self.data):
-            if self.data[header_offset + 12 : header_offset + 14] == LZW_MAGIC:
-                result = self._read_blocks_from(header_offset, target_size)
-                if len(result) == target_size:
-                    return result
+        if (
+            header_offset >= 0
+            and header_offset + 14 <= len(self.data)
+            and self.data[header_offset + 12 : header_offset + 14] == LZW_MAGIC
+        ):
+            result = self._read_blocks_from(header_offset, target_size)
+            if len(result) == target_size:
+                return result
 
         # Fallback: build block index and match by size
         if self._block_index is None:
@@ -608,7 +605,7 @@ class TBAFSArchive:
                     data = self.read_file_data(entry)
                     file_path.write_bytes(data)
                     print(f"Extracted: {entry.full_path} ({len(data)} bytes)")
-                except Exception as e:
+                except (TBAFSExtractionError, ValueError, struct.error) as e:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)
 
 
@@ -619,9 +616,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # List command
-    list_parser = subparsers.add_parser(
-        "list", aliases=["l"], help="List archive contents"
-    )
+    list_parser = subparsers.add_parser("list", aliases=["l"], help="List archive contents")
     list_parser.add_argument("archive", help="Path to .b21 archive")
     list_parser.add_argument(
         "-v", "--verbose", action="store_true", help="Show sizes and filetypes"
@@ -635,9 +630,7 @@ def main() -> int:
     extract_parser.add_argument("-o", "--output", default=".", help="Output directory")
 
     # Info command
-    info_parser = subparsers.add_parser(
-        "info", aliases=["i"], help="Show archive information"
-    )
+    info_parser = subparsers.add_parser("info", aliases=["i"], help="Show archive information")
     info_parser.add_argument("archive", help="Path to .b21 archive")
 
     args = parser.parse_args()
@@ -660,9 +653,7 @@ def main() -> int:
                 case "info" | "i":
                     print(f"Magic: {archive.header.magic}")
                     print(f"Root allocation: {archive.header.root_alloc}")
-                    print(
-                        f"First entry offset: 0x{archive.header.first_entry_offset:X}"
-                    )
+                    print(f"First entry offset: 0x{archive.header.first_entry_offset:X}")
                     print(f"Entry count: {archive.header.entry_count}")
 
                     # Single-pass counting
@@ -676,7 +667,7 @@ def main() -> int:
     except FileNotFoundError:
         print(f"Error: File not found: {args.archive}", file=sys.stderr)
         return 1
-    except ValueError as e:
+    except (ValueError, TBAFSExtractionError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
