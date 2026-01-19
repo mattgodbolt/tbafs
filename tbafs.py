@@ -119,8 +119,9 @@ class DirEntry:
     exec_addr: int  # RISC OS exec address (timestamp)
     size: int  # Uncompressed size (0 for directories)
     flags: int  # Compression flags (3 = Squash compressed)
+    riscos_name: str  # RISC OS filename
     name: str  # Filename
-    parent_path: str  # Path to parent directory
+    parent: DirEntry | None  # Parent directory object, or None if root
 
     @property
     def filetype(self) -> int | None:
@@ -155,9 +156,15 @@ class DirEntry:
 
     @property
     def full_path(self) -> str:
-        if self.parent_path:
-            return f"{self.parent_path}/{self.name}"
+        if self.parent:
+            return f"{self.parent.full_path}/{self.name}"
         return self.name
+
+    @property
+    def full_riscos_path(self) -> str:
+        if self.parent:
+            return f"{self.parent.full_riscos_path}.{self.riscos_name}"
+        return self.riscos_name
 
 
 class LZWDecompressor:
@@ -261,6 +268,9 @@ class LZWDecompressor:
 class TBAFSArchive:
     """TBAFS archive reader."""
 
+    # Encoding used for filenames
+    filename_encoding = "latin-1"
+
     def __init__(self, file: BinaryIO):
         self.file = file
         self.data = file.read()
@@ -289,7 +299,22 @@ class TBAFSArchive:
             entry_count=entry_count,
         )
 
-    def _parse_entry(self, offset: int, parent_path: str = "") -> DirEntry | None:
+    def _riscos_decode(self, name_bytes: bytes) -> str:
+        """
+        Decode a RISC OS name into Unicode (replace the encoding).
+        """
+        name = name_bytes.decode(self.filename_encoding, errors="replace")
+        return name
+
+    def _riscos_to_posix_name(self, name: str) -> str:
+        """
+        Convert a RISC OS format filename to the form used on POSIX systems.
+        (without filetype appended)
+        """
+        name = name.replace("/", ".")
+        return name
+
+    def _parse_entry(self, offset: int, parent: DirEntry | None) -> DirEntry | None:
         """Parse a single directory entry at the given offset."""
         if offset + ENTRY_SIZE > len(self.data):
             return None
@@ -305,7 +330,8 @@ class TBAFSArchive:
         null_pos = name_bytes.find(b"\x00")
         if null_pos != -1:
             name_bytes = name_bytes[:null_pos]
-        name = name_bytes.decode("latin-1", errors="replace")
+        riscos_name = self._riscos_decode(name_bytes)
+        name = self._riscos_to_posix_name(riscos_name)
 
         return DirEntry(
             offset=offset,
@@ -316,7 +342,8 @@ class TBAFSArchive:
             size=size,
             flags=flags,
             name=name,
-            parent_path=parent_path,
+            riscos_name=riscos_name,
+            parent=parent,
         )
 
     def _is_valid_entry(self, entry: DirEntry | None) -> bool:
@@ -334,7 +361,7 @@ class TBAFSArchive:
         return (entry.load_addr >> 20) == 0xFFF
 
     def _find_all_entries_in_range(
-        self, start: int, end: int, parent_path: str = ""
+        self, start: int, end: int, parent: DirEntry | None
     ) -> list[DirEntry]:
         """
         Find ALL valid directory entries within a byte range.
@@ -347,7 +374,7 @@ class TBAFSArchive:
         pos = align_to(start)
 
         while pos < end and pos + ENTRY_SIZE <= len(self.data):
-            entry = self._parse_entry(pos, parent_path)
+            entry = self._parse_entry(pos, parent)
 
             if entry and entry.entry_type == ENTRY_TYPE_END:
                 # End marker - skip past it
@@ -362,7 +389,7 @@ class TBAFSArchive:
 
         return entries
 
-    def _collect_all_directories(self, start_offset: int) -> list[tuple[int, str]]:
+    def _collect_all_directories(self, start_offset: int) -> list[DirEntry]:
         """
         Collect ALL directory entries in the archive with a global scan.
 
@@ -374,20 +401,21 @@ class TBAFSArchive:
         # First, get root-level entries
         offset = start_offset
         while offset < len(self.data):
-            entry = self._parse_entry(offset, "")
+            entry = self._parse_entry(offset, None)
             if entry is None or entry.is_end:
                 break
             if self._is_valid_entry(entry) and entry.is_directory:
-                directories.append((entry.data_offset, entry.name))
+                directories.append(entry)
             offset += ENTRY_SIZE
 
         # Now recursively find subdirectories within each top-level directory
         # We'll scan all directory ranges
-        found_dirs: deque[tuple[int, str]] = deque(directories)
+        found_dirs: deque[DirEntry] = deque(directories)
         processed: set[int] = set()
 
         while found_dirs:
-            data_offset, path = found_dirs.popleft()
+            dir_entry = found_dirs.popleft()
+            data_offset = dir_entry.data_offset
             if data_offset in processed:
                 continue
             processed.add(data_offset)
@@ -396,7 +424,7 @@ class TBAFSArchive:
             # We'll find more subdirectories here
             pos = align_to(data_offset)
             while pos < len(self.data) - ENTRY_SIZE:
-                entry = self._parse_entry(pos, path)
+                entry = self._parse_entry(pos, dir_entry)
 
                 if entry and entry.entry_type == ENTRY_TYPE_END:
                     pos += BLOCK_ALIGNMENT
@@ -404,9 +432,8 @@ class TBAFSArchive:
 
                 if self._is_valid_entry(entry) and entry is not None:
                     if entry.is_directory:
-                        full_path = f"{path}/{entry.name}" if path else entry.name
-                        directories.append((entry.data_offset, full_path))
-                        found_dirs.append((entry.data_offset, full_path))
+                        directories.append(entry)
+                        found_dirs.append(entry)
                     pos += ENTRY_SIZE
                 else:
                     pos += BLOCK_ALIGNMENT
@@ -416,7 +443,7 @@ class TBAFSArchive:
     def iter_entries(
         self,
         dir_offset: int | None = None,
-        parent_path: str = "",
+        parent: DirEntry | None = None,
         global_boundaries: list[int] | None = None,
     ) -> Iterator[DirEntry]:
         """Iterate over all directory entries, recursively."""
@@ -426,14 +453,14 @@ class TBAFSArchive:
 
             # First pass: collect ALL directories globally to establish boundaries
             all_dirs = self._collect_all_directories(start_offset)
-            all_dir_offsets = sorted({d[0] for d in all_dirs})
+            all_dir_offsets = sorted({d.data_offset for d in all_dirs})
             all_dir_offsets.append(len(self.data))  # Add EOF as final boundary
 
             # Collect root entries (fixed positions)
             root_entries = []
             offset = start_offset
             while offset < len(self.data):
-                entry = self._parse_entry(offset, parent_path)
+                entry = self._parse_entry(offset, parent)
                 if entry is None or entry.is_end:
                     break
                 if self._is_valid_entry(entry):
@@ -444,9 +471,7 @@ class TBAFSArchive:
             for entry in root_entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(
-                        entry.data_offset, entry.full_path, all_dir_offsets
-                    )
+                    yield from self.iter_entries(entry.data_offset, entry, all_dir_offsets)
         else:
             # For subdirectories, use global boundaries to find our scan range
             start = dir_offset
@@ -460,15 +485,13 @@ class TBAFSArchive:
                         break
 
             # Scan for entries within our bounded range
-            entries = self._find_all_entries_in_range(start, end, parent_path)
+            entries = self._find_all_entries_in_range(start, end, parent)
 
             # Yield entries and recurse into subdirectories
             for entry in entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(
-                        entry.data_offset, entry.full_path, global_boundaries
-                    )
+                    yield from self.iter_entries(entry.data_offset, entry, global_boundaries)
 
     def _build_block_index(self) -> dict[int, tuple[int, int]]:
         """
