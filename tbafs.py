@@ -633,6 +633,16 @@ class TBAFSArchive:
                 except (TBAFSExtractionError, ValueError, struct.error) as e:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)
 
+    def show_types(self) -> None:
+        """
+        List all the files with *SetType commands to restore types on RISC OS.
+        """
+        for entry in self.iter_entries():
+            if entry.is_file:
+                filetype = entry.filetype
+                if filetype is not None:
+                    print(f"*SetType {entry.full_riscos_path} {filetype:03X}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -653,6 +663,14 @@ def main() -> int:
     )
     extract_parser.add_argument("archive", help="Path to .b21 archive")
     extract_parser.add_argument("-o", "--output", default=".", help="Output directory")
+
+    # Types command
+    extract_parser = subparsers.add_parser(
+        "types",
+        aliases=["t"],
+        help="Output *SetType commands to restore filetypes on an incorrectly extracted file",
+    )
+    extract_parser.add_argument("archive", help="Path to .b21 archive")
 
     # Info command
     info_parser = subparsers.add_parser("info", aliases=["i"], help="Show archive information")
@@ -676,19 +694,22 @@ def main() -> int:
                     output_dir.mkdir(parents=True, exist_ok=True)
                     archive.extract_all(output_dir)
 
-            elif args.command in ('info', 'i'):
-                    print(f"Magic: {archive.header.magic}")
-                    print(f"Root allocation: {archive.header.root_alloc}")
-                    print(f"First entry offset: 0x{archive.header.first_entry_offset:X}")
-                    print(f"Entry count: {archive.header.entry_count}")
+            elif args.command in ("types", "t"):
+                archive.show_types()
 
-                    # Single-pass counting
-                    files, dirs = 0, 0
-                    for e in archive.iter_entries():
-                        files += e.is_file
-                        dirs += e.is_directory
-                    print(f"Files: {files}")
-                    print(f"Directories: {dirs}")
+            elif args.command in ("info", "i"):
+                print(f"Magic: {archive.header.magic}")
+                print(f"Root allocation: {archive.header.root_alloc}")
+                print(f"First entry offset: 0x{archive.header.first_entry_offset:X}")
+                print(f"Entry count: {archive.header.entry_count}")
+
+                # Single-pass counting
+                files, dirs = 0, 0
+                for e in archive.iter_entries():
+                    files += e.is_file
+                    dirs += e.is_directory
+                print(f"Files: {files}")
+                print(f"Directories: {dirs}")
 
     except FileNotFoundError:
         print(f"Error: File not found: {args.archive}", file=sys.stderr)
