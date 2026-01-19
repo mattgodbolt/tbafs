@@ -51,6 +51,13 @@ The resulting `.adf` file can be loaded directly in emulators like RPCEmu or Arc
 python3 tbafs.py info samples/Blurp.b21
 ```
 
+### Create *SetTypes script
+
+```bash
+python3 tbafs.py types samples/Blurp.b21
+```
+
+
 ## Example Output
 
 ```

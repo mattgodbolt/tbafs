@@ -117,9 +117,10 @@ class DirEntry:
     exec_addr: int  # RISC OS exec address (timestamp) (at entry[0x08])
     size: int  # Uncompressed size (0 for directories) (at entry[0x0c])
     flags: int  # Attributes (at entry[0x10])
+    riscos_name: str  # RISC OS filename
     name: str  # Filename (at entry[0x14], 32 bytes max)
     data_position: int  # Disk position for file data (at entry[0x3c])
-    parent_path: str  # Path to parent directory
+    parent: DirEntry | None  # Parent directory object, or None if root
 
     @property
     def filetype(self) -> int | None:
@@ -150,9 +151,15 @@ class DirEntry:
 
     @property
     def full_path(self) -> str:
-        if self.parent_path:
-            return f"{self.parent_path}/{self.name}"
+        if self.parent:
+            return f"{self.parent.full_path}/{self.name}"
         return self.name
+
+    @property
+    def full_riscos_path(self) -> str:
+        if self.parent:
+            return f"{self.parent.full_riscos_path}.{self.riscos_name}"
+        return self.riscos_name
 
 
 class LZWDecompressor:
@@ -256,6 +263,9 @@ class LZWDecompressor:
 class TBAFSArchive:
     """TBAFS archive reader."""
 
+    # Encoding used for filenames
+    filename_encoding = "latin-1"
+
     def __init__(self, file: BinaryIO):
         self.file = file
         self.data = file.read()
@@ -283,7 +293,22 @@ class TBAFSArchive:
             entry_count=entry_count,
         )
 
-    def _parse_entry(self, offset: int, parent_path: str = "") -> DirEntry:
+    def _riscos_decode(self, name_bytes: bytes) -> str:
+        """
+        Decode a RISC OS name into Unicode (replace the encoding).
+        """
+        name = name_bytes.decode(self.filename_encoding, errors="replace")
+        return name
+
+    def _riscos_to_posix_name(self, name: str) -> str:
+        """
+        Convert a RISC OS format filename to the form used on POSIX systems.
+        (without filetype appended)
+        """
+        name = name.replace("/", ".")
+        return name
+
+    def _parse_entry(self, offset: int, parent: DirEntry | None) -> DirEntry:
         """Parse a single directory entry at the given offset.
 
         Entry structure (64 bytes):
@@ -313,7 +338,8 @@ class TBAFSArchive:
         null_pos = name_bytes.find(b"\x00")
         if null_pos != -1:
             name_bytes = name_bytes[:null_pos]
-        name = name_bytes.decode("latin-1", errors="replace")
+        riscos_name = self._riscos_decode(name_bytes)
+        name = self._riscos_to_posix_name(riscos_name)
 
         # Data position at offset 0x3c
         data_position = struct.unpack("<I", entry_data[0x3C:0x40])[0]
@@ -325,9 +351,10 @@ class TBAFSArchive:
             exec_addr=exec_addr,
             size=size,
             flags=flags,
+            riscos_name=riscos_name,
             name=name,
             data_position=data_position,
-            parent_path=parent_path,
+            parent=parent,
         )
 
     def _get_dir_entry_blocks(self, entry: DirEntry) -> list[tuple[int, int]]:
@@ -366,7 +393,6 @@ class TBAFSArchive:
     def iter_entries(
         self,
         dir_entry: DirEntry | None = None,
-        parent_path: str = "",
     ) -> Iterator[DirEntry]:
         """Iterate over all directory entries, recursively.
 
@@ -384,7 +410,7 @@ class TBAFSArchive:
             offset = start_offset
             max_entries = min(self.header.entry_count, MAX_ENTRIES_PER_BLOCK)
             for _ in range(max_entries):
-                entry = self._parse_entry(offset, parent_path)
+                entry = self._parse_entry(offset, None)
                 if entry.is_end:
                     break
                 root_entries.append(entry)
@@ -394,7 +420,7 @@ class TBAFSArchive:
             for entry in root_entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(entry, entry.full_path)
+                    yield from self.iter_entries(entry)
         else:
             # Get all entry blocks for this directory
             entry_blocks = self._get_dir_entry_blocks(dir_entry)
@@ -405,7 +431,7 @@ class TBAFSArchive:
                 # Scan 'count' entries starting at block_pos
                 for i in range(count):
                     offset = block_pos + i * ENTRY_SIZE
-                    entry = self._parse_entry(offset, parent_path)
+                    entry = self._parse_entry(offset, dir_entry)
                     if entry.is_end:
                         break
                     entries.append(entry)
@@ -414,7 +440,7 @@ class TBAFSArchive:
             for entry in entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(entry, entry.full_path)
+                    yield from self.iter_entries(entry)
 
     def _read_block(self, block_pos: int) -> bytes:
         """Read and decompress a single data block.
@@ -555,16 +581,18 @@ class TBAFSArchive:
                 dir_path.mkdir(parents=True, exist_ok=True)
                 print(f"Created: {entry.full_path}/")
             elif entry.is_file:
-                ft = entry.filetype
-                if ft is None:
-                    raise TBAFSExtractionError(f"Missing filetype for {entry.full_path}")
-                file_path = output_dir / f"{entry.full_path},{ft:03x}"
+                path = entry.full_path
+                if entry.filetype is not None:
+                    path = f"{path},{entry.filetype:03x}"
+                else:
+                    path = f"{path},{entry.load_addr:08x},{entry.exec_addr:08x}"
+                file_path = output_dir / path
                 file_path.parent.mkdir(parents=True, exist_ok=True)
 
                 try:
                     data = self.read_file_data(entry)
                     file_path.write_bytes(data)
-                    print(f"Extracted: {entry.full_path},{ft:03x} ({len(data)} bytes)")
+                    print(f"Extracted: {path} ({len(data)} bytes)")
                 except (TBAFSExtractionError, ValueError, struct.error) as e:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)
 
@@ -594,6 +622,16 @@ class TBAFSArchive:
         image.write(output_file)
         print(f"\nWrote ADFS image: {output_file} ({output_file.stat().st_size} bytes)")
 
+    def show_types(self) -> None:
+        """
+        List all the files with *SetType commands to restore types on RISC OS.
+        """
+        for entry in self.iter_entries():
+            if entry.is_file:
+                filetype = entry.filetype
+                if filetype is not None:
+                    print(f"*SetType {entry.full_riscos_path} {filetype:03X}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -620,6 +658,14 @@ def main() -> int:
         help="Output to ADFS E format floppy image instead of filesystem",
     )
 
+    # Types command
+    extract_parser = subparsers.add_parser(
+        "types",
+        aliases=["t"],
+        help="Output *SetType commands to restore filetypes on an incorrectly extracted file",
+    )
+    extract_parser.add_argument("archive", help="Path to .b21 archive")
+
     # Info command
     info_parser = subparsers.add_parser("info", aliases=["i"], help="Show archive information")
     info_parser.add_argument("archive", help="Path to .b21 archive")
@@ -644,6 +690,9 @@ def main() -> int:
                     output_dir = Path(args.output)
                     output_dir.mkdir(parents=True, exist_ok=True)
                     archive.extract_all(output_dir)
+
+            elif args.command in ("types", "t"):
+                archive.show_types()
 
             elif args.command in ("info", "i"):
                 print(f"Magic: {archive.header.magic}")
