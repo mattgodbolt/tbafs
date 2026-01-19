@@ -613,7 +613,7 @@ class TBAFSArchive:
             elif entry.is_directory and verbose:
                 print(f"{'<DIR>':8} {'':8}   {entry.full_path}/")
 
-    def extract_all(self, output_dir: Path) -> None:
+    def extract_all(self, output_dir: Path, with_types: bool = False) -> None:
         """Extract all files to the output directory."""
         for entry in self.iter_entries():
             if entry.is_directory:
@@ -623,13 +623,19 @@ class TBAFSArchive:
                 print(f"Created: {entry.full_path}/")
             elif entry.is_file:
                 # Extract file
-                file_path = output_dir / entry.full_path
+                path = entry.full_path
+                if with_types:
+                    if entry.filetype is not None:
+                        path = f"{path},{entry.filetype:03x}"
+                    else:
+                        path = f"{path},{entry.load_addr:08x},{entry.exec_addr:08x}"
+                file_path = output_dir / path
                 file_path.parent.mkdir(parents=True, exist_ok=True)
 
                 try:
                     data = self.read_file_data(entry)
                     file_path.write_bytes(data)
-                    print(f"Extracted: {entry.full_path} ({len(data)} bytes)")
+                    print(f"Extracted: {path} ({len(data)} bytes)")
                 except (TBAFSExtractionError, ValueError, struct.error) as e:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)
 
@@ -663,6 +669,9 @@ def main() -> int:
     )
     extract_parser.add_argument("archive", help="Path to .b21 archive")
     extract_parser.add_argument("-o", "--output", default=".", help="Output directory")
+    extract_parser.add_argument(
+        "-t", "--types", action="store_true", help="Use ,xxx suffixes for filetypes"
+    )
 
     # Types command
     extract_parser = subparsers.add_parser(
@@ -689,10 +698,10 @@ def main() -> int:
             if args.command in ("list", "l"):
                 archive.list_files(verbose=args.verbose)
 
-            elif args.command in ('extract', 'x'):
-                    output_dir = Path(args.output)
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    archive.extract_all(output_dir)
+            elif args.command in ("extract", "x"):
+                output_dir = Path(args.output)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                archive.extract_all(output_dir, with_types=args.types)
 
             elif args.command in ("types", "t"):
                 archive.show_types()
