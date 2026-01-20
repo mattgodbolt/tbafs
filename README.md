@@ -55,18 +55,16 @@ python3 tbafs.py info samples/Blurp.b21
 
 ```
 $ python3 tbafs.py list -v samples/Blurp.b21
-<DIR>               !Blurp/
-     275 Obey     C !Blurp/!Boot
-     589 Obey     C !Blurp/!Run
-  174260 Absolute C !Blurp/!RunImage
-    3868 Sprite   C !Blurp/!Sprites
-     441 005      C !Blurp/GameCols
-<DIR>               !Blurp/Graphics/
-   11297 UnkData  C !Blurp/Graphics/Aura
+   <DIR>          !Blurp/
+     275 Obey     !Blurp/!Boot
+     589 Obey     !Blurp/!Run
+  174260 Absolute !Blurp/!RunImage
+    3868 Sprite   !Blurp/!Sprites
+     441 005      !Blurp/GameCols
+   <DIR>          !Blurp/Graphics/
+   11297 004      !Blurp/Graphics/Aura
 ...
 ```
-
-The `C` indicates the file is compressed.
 
 ## Format Documentation
 

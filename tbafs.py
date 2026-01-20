@@ -29,6 +29,7 @@ LZW_CLEAR_CODE = 256
 COMP_TYPE_RAW = 0  # Type 0: Uncompressed/raw data
 COMP_TYPE_HCT1 = 1  # Type 1: HCT1/CompMod compressed (not supported)
 COMP_TYPE_SQUASH = 2  # Type 2: Squash/LZW compressed
+# LZW starts with 9-bit codes (codes 0-511), expanding to 12-bit as dictionary grows
 LZW_INITIAL_BITS = 9
 
 # Entry type constants
@@ -73,7 +74,6 @@ FILETYPES = {
     0xC85: "JPEG",
     0xAFF: "DrawFile",
     0x695: "GIF",
-    0x004: "UnkData",  # Unknown data type often seen
 }
 
 
@@ -84,8 +84,6 @@ def _create_initial_dictionary() -> dict[int, bytes]:
 
 class TBAFSExtractionError(Exception):
     """Raised when file data cannot be extracted."""
-
-    pass
 
 
 # Pre-compiled struct formats for header and entry parsing
@@ -243,7 +241,8 @@ class LZWDecompressor:
                 dictionary[next_code] = prev_string + entry[0:1]
                 next_code += 1
 
-                # Increase code size if needed
+                # Increase code size when next_code exceeds current bit width capacity
+                # e.g., when next_code=512 (needs 10 bits), increase from 9 to 10 bits
                 if next_code > (1 << current_bits) - 1 and current_bits < max_bits:
                     current_bits += 1
 
@@ -547,7 +546,8 @@ class TBAFSArchive:
                 print(f"Created: {entry.full_path}/")
             elif entry.is_file:
                 ft = entry.filetype
-                assert ft is not None, f"Missing filetype for {entry.full_path}"
+                if ft is None:
+                    raise TBAFSExtractionError(f"Missing filetype for {entry.full_path}")
                 file_path = output_dir / f"{entry.full_path},{ft:03x}"
                 file_path.parent.mkdir(parents=True, exist_ok=True)
 

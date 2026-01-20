@@ -26,13 +26,13 @@ E_HEADS = 2
 E_TRACKS = 80
 E_DENSITY = 2  # Double density
 
-# E format specific parameters (from RISC OS)
-E_NZONES = 1
-E_IDLEN = 15  # bits for fragment ID
-E_LOG2_BPMB = 7  # log2(128) - bytes per map bit
-E_BPMB = 128  # bytes per map bit
-E_ZONE_SPARE = 0x520  # 1312 bits
-E_ROOTFRAG = 0x00000203  # Fragment 2, sector offset 3
+# E format specific parameters (from RISC OS PRM)
+E_NZONES = 1  # Single allocation zone covers entire disc
+E_IDLEN = 15  # Fragment ID width in bits (allows 32767 fragments)
+E_LOG2_BPMB = 7  # log2(128) - each map bit represents 128 bytes
+E_BPMB = 128  # Bytes per map bit (minimum allocation unit)
+E_ZONE_SPARE = 0x520  # 1312 spare bits at end of zone for header overhead
+E_ROOTFRAG = 0x00000203  # Root directory: fragment 2, sector offset 3
 
 # Key offsets for E format (no boot block on floppies!)
 MAP_OFFSET = 0x000  # Map zone 0 at sector 0
@@ -48,6 +48,7 @@ NEWDIR_TAIL_OFFSET = 0x7D7  # 2007 = 2048 - 41
 # File attributes
 ATTR_OWNER_READ = 0x01
 ATTR_OWNER_WRITE = 0x02
+# Bit 0x08 has dual meaning: LOCKED for files, DIRECTORY flag for directory entries
 ATTR_LOCKED = 0x08
 ATTR_DIRECTORY = 0x08
 DEFAULT_ATTRIBS = ATTR_OWNER_READ | ATTR_OWNER_WRITE
