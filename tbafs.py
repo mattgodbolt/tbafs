@@ -11,6 +11,8 @@ The format uses 12-bit LZW compression (identical to Unix compress -b 12).
 from __future__ import annotations
 
 import argparse
+import datetime
+import os
 import struct
 import sys
 from collections.abc import Iterator
@@ -94,6 +96,21 @@ HEADER_STRUCT = struct.Struct("<4I")  # root_alloc, unknown1, dir_header_size, r
 # Name at offset 0x14 (20 bytes), data_position at offset 0x3c
 ENTRY_STRUCT = struct.Struct("<5I")  # type, load, exec, size, flags
 
+UNIX_EPOCH_TO_RISCOS_EPOCH = int(int(70 * 365.25) * 24 * 60 * 60)
+
+
+def quin_to_epochtime(quin: int) -> float | None:
+    if not quin:
+        return None
+    return (quin / 100.0) - UNIX_EPOCH_TO_RISCOS_EPOCH
+
+
+def quin_to_datetime(quin: int) -> datetime.datetime | None:
+    epoch = quin_to_epochtime(quin)
+    if not epoch:
+        return None
+    return datetime.datetime.utcfromtimestamp(epoch)
+
 
 @dataclass
 class TBAFSHeader:
@@ -136,6 +153,25 @@ class DirEntry:
         if ft is None:
             return "---"
         return FILETYPES.get(ft, f"{ft:03X}")
+
+    @property
+    def quin(self) -> int | None:
+        """
+        Extract the RISC OS 5-byte timestamp, or None if not stamped
+        """
+        if self.load_addr & 0xFFF00000 == 0xFFF00000:
+            return ((self.load_addr & 0xFF) << 32) | self.exec_addr
+        return None
+
+    @property
+    def datetime(self) -> datetime.datetime | None:
+        """
+        Datetime object for the RISC OS timestamp.
+        """
+        quin = self.quin
+        if not quin:
+            return None
+        return quin_to_datetime(quin)
 
     @property
     def is_file(self) -> bool:
@@ -567,11 +603,19 @@ class TBAFSArchive:
             if entry.is_file:
                 ft = entry.filetype_name
                 if verbose:
-                    print(f"{entry.size:8} {ft:8} {entry.full_path}")
+                    dt = entry.datetime
+                    dt_string = ""
+                    if dt:
+                        dt_string = dt.strftime("%d %b %Y %H:%M:%S")
+                    print(f"{entry.size:8} {ft:8}  {dt_string:20}  {entry.full_path}")
                 else:
                     print(entry.full_path)
             elif entry.is_directory and verbose:
-                print(f"{'<DIR>':8} {'':8} {entry.full_path}/")
+                dt = entry.datetime
+                dt_string = ""
+                if dt:
+                    dt_string = dt.strftime("%d %b %Y %H:%M:%S")
+                print(f"{'<DIR>':8} {'':8}  {dt_string:20}  {entry.full_path}/")
 
     def extract_all(self, output_dir: Path) -> None:
         """Extract all files to the output directory."""
@@ -579,6 +623,12 @@ class TBAFSArchive:
             if entry.is_directory:
                 dir_path = output_dir / entry.full_path
                 dir_path.mkdir(parents=True, exist_ok=True)
+
+                dt = entry.datetime
+                if dt:
+                    # We can only set the timestamp on files that have them
+                    timestamp = dt.timestamp()
+                    os.utime(dir_path, (timestamp, timestamp))
                 print(f"Created: {entry.full_path}/")
             elif entry.is_file:
                 path = entry.full_path
@@ -592,6 +642,12 @@ class TBAFSArchive:
                 try:
                     data = self.read_file_data(entry)
                     file_path.write_bytes(data)
+
+                    dt = entry.datetime
+                    if dt:
+                        # We can only set the timestamp on files that have them
+                        timestamp = dt.timestamp()
+                        os.utime(file_path, (timestamp, timestamp))
                     print(f"Extracted: {path} ({len(data)} bytes)")
                 except (TBAFSExtractionError, ValueError, struct.error) as e:
                     print(f"Error extracting {entry.full_path}: {e}", file=sys.stderr)

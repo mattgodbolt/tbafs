@@ -62,14 +62,14 @@ python3 tbafs.py types samples/Blurp.b21
 
 ```
 $ python3 tbafs.py list -v samples/Blurp.b21
-   <DIR>          !Blurp/
-     275 Obey     !Blurp/!Boot
-     589 Obey     !Blurp/!Run
-  174260 Absolute !Blurp/!RunImage
-    3868 Sprite   !Blurp/!Sprites
-     441 005      !Blurp/GameCols
-   <DIR>          !Blurp/Graphics/
-   11297 004      !Blurp/Graphics/Aura
+<DIR>              20 Jul 1997 22:46:55  !Blurp/
+     275 Obey      27 Jul 1994 17:50:14  !Blurp/!Boot
+     534 Obey      26 Jan 1997 17:23:33  !Blurp/!Run
+  174292 Absolute  01 Jan 1997 21:30:15  !Blurp/!RunImage
+    3868 Sprite    01 Jul 1994 15:45:44  !Blurp/!Sprites
+     441 005       27 Oct 1994 17:10:37  !Blurp/GameCols
+<DIR>              20 Jul 1997 22:46:56  !Blurp/Graphics/
+   11128 004       27 Nov 1996 23:39:16  !Blurp/Graphics/Aura
 ...
 ```
 
@@ -86,7 +86,6 @@ Key features:
 ## Limitations
 
 - Extraction only (cannot create archives)
-- RISC OS timestamps are not preserved when extracting to filesystem (use `--adfs` to preserve them)
 - ADFS images are limited to 800KB (E format)
 
 ## RISC OS Filetypes
