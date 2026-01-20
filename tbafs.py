@@ -11,7 +11,6 @@ The format uses 12-bit LZW compression (identical to Unix compress -b 12).
 import argparse
 import struct
 import sys
-from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +29,11 @@ LZW_BLOCK_SIZE = 32768  # 32KB decompressed blocks for large files
 LZW_MAGIC = b"\x1f\x9d"
 LZW_MAX_BITS = 12
 LZW_CLEAR_CODE = 256
+
+# Compression types (encoded in high byte of h1 field in data block header)
+COMP_TYPE_RAW = 0  # Type 0: Uncompressed/raw data
+COMP_TYPE_HCT1 = 1  # Type 1: HCT1/CompMod compressed (not supported)
+COMP_TYPE_SQUASH = 2  # Type 2: Squash/LZW compressed
 LZW_INITIAL_BITS = 9
 MAX_COMPRESSED_SIZE = 500_000  # Sanity check limit for compressed block size
 
@@ -76,6 +80,20 @@ FILETYPES = {
 def align_to(offset: int, alignment: int = BLOCK_ALIGNMENT) -> int:
     """Round offset up to next alignment boundary."""
     return (offset + alignment - 1) & ~(alignment - 1)
+
+
+def parse_h1_field(h1: int) -> tuple[int, int]:
+    """Parse the h1 field from a data block header.
+
+    The h1 field is a packed 32-bit value:
+    - Bits 24-31: compression type (0=raw, 1=HCT1, 2=Squash)
+    - Bits 0-23: size field (meaning depends on compression type)
+
+    Returns (compression_type, size_field).
+    """
+    compression_type = (h1 >> 24) & 0xFF
+    size_field = h1 & 0xFFFFFF
+    return compression_type, size_field
 
 
 def _create_initial_dictionary() -> dict[int, bytes]:
@@ -362,71 +380,53 @@ class TBAFSArchive:
 
         return entries
 
-    def _collect_all_directories(self, start_offset: int) -> list[tuple[int, str]]:
+    def _get_dir_content_start(self, entry: DirEntry) -> int:
         """
-        Collect ALL directory entries in the archive with a global scan.
+        Get the absolute position where a directory's content starts.
 
-        Returns list of (data_offset, full_path) for each directory.
-        This is used to establish global boundaries for scanning.
+        For directories with data_offset=0x410 (sentinel), content starts at
+        entry.offset + data_offset. Otherwise data_offset is already absolute.
         """
-        directories = []
+        if entry.data_offset == 0x410:
+            return entry.offset + entry.data_offset
+        return entry.data_offset
 
-        # First, get root-level entries
-        offset = start_offset
-        while offset < len(self.data):
-            entry = self._parse_entry(offset, "")
-            if entry is None or entry.is_end:
-                break
-            if self._is_valid_entry(entry) and entry.is_directory:
-                directories.append((entry.data_offset, entry.name))
-            offset += ENTRY_SIZE
+    def _collect_all_directory_boundaries(self) -> list[int]:
+        """
+        Scan the entire archive to find all directory content_start positions.
 
-        # Now recursively find subdirectories within each top-level directory
-        # We'll scan all directory ranges
-        found_dirs: deque[tuple[int, str]] = deque(directories)
-        processed: set[int] = set()
+        Returns a sorted list of unique content_start positions for all directories.
+        These positions define the boundaries between directory entry blocks.
 
-        while found_dirs:
-            data_offset, path = found_dirs.popleft()
-            if data_offset in processed:
-                continue
-            processed.add(data_offset)
+        The scan is done at 16-byte intervals since entries are aligned.
+        """
+        content_starts: set[int] = set()
 
-            # Scan from this directory's offset to end of file
-            # We'll find more subdirectories here
-            pos = align_to(data_offset)
-            while pos < len(self.data) - ENTRY_SIZE:
-                entry = self._parse_entry(pos, path)
+        # Scan entire file at 16-byte intervals to find directory entries
+        pos = 0
+        while pos < len(self.data) - ENTRY_SIZE:
+            entry = self._parse_entry(pos, "")
+            if entry and entry.entry_type == ENTRY_TYPE_DIR and self._is_valid_entry(entry):
+                content_start = self._get_dir_content_start(entry)
+                content_starts.add(content_start)
+            pos += BLOCK_ALIGNMENT
 
-                if entry and entry.entry_type == ENTRY_TYPE_END:
-                    pos += BLOCK_ALIGNMENT
-                    continue
-
-                if self._is_valid_entry(entry) and entry is not None:
-                    if entry.is_directory:
-                        full_path = f"{path}/{entry.name}" if path else entry.name
-                        directories.append((entry.data_offset, full_path))
-                        found_dirs.append((entry.data_offset, full_path))
-                    pos += ENTRY_SIZE
-                else:
-                    pos += BLOCK_ALIGNMENT
-
-        return directories
+        return sorted(content_starts)
 
     def iter_entries(
         self,
-        dir_offset: int | None = None,
+        dir_content_start: int | None = None,
         parent_path: str = "",
         global_boundaries: list[int] | None = None,
     ) -> Iterator[DirEntry]:
         """Iterate over all directory entries, recursively."""
-        if dir_offset is None:
+        if dir_content_start is None:
             # Root directory: entries start at dir_header_size + ROOT_DIR_RESERVED
             start_offset = self.header.dir_header_size + ROOT_DIR_RESERVED
 
-            # First pass: collect ALL directories globally to establish boundaries
-            all_dirs = self._collect_all_directories(start_offset)
-            all_dir_offsets = sorted({d[0] for d in all_dirs})
+            # First pass: scan entire archive to find all directory content_start positions
+            # These define the boundaries between directory entry blocks
+            all_dir_offsets = self._collect_all_directory_boundaries()
             all_dir_offsets.append(len(self.data))  # Add EOF as final boundary
 
             # Collect root entries (fixed positions)
@@ -444,12 +444,12 @@ class TBAFSArchive:
             for entry in root_entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(
-                        entry.data_offset, entry.full_path, all_dir_offsets
-                    )
+                    # Use content_start position, not raw data_offset
+                    content_start = self._get_dir_content_start(entry)
+                    yield from self.iter_entries(content_start, entry.full_path, all_dir_offsets)
         else:
             # For subdirectories, use global boundaries to find our scan range
-            start = dir_offset
+            start = dir_content_start
 
             # Find the end boundary: the smallest offset greater than ours
             end = len(self.data)
@@ -466,9 +466,9 @@ class TBAFSArchive:
             for entry in entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(
-                        entry.data_offset, entry.full_path, global_boundaries
-                    )
+                    # Use content_start position, not raw data_offset
+                    content_start = self._get_dir_content_start(entry)
+                    yield from self.iter_entries(content_start, entry.full_path, global_boundaries)
 
     def _read_blocks_from(self, start_offset: int, target_size: int) -> bytes:
         """
@@ -518,6 +518,21 @@ class TBAFSArchive:
             return False
         return self.data[offset : offset + 2] == LZW_MAGIC
 
+    def _get_block_compression_type(self, block_pos: int) -> int | None:
+        """Get the compression type from a data block header.
+
+        The compression type is encoded in the high byte of h1 (offset +4).
+        Returns None if position is invalid, otherwise returns:
+        - COMP_TYPE_RAW (0): uncompressed
+        - COMP_TYPE_HCT1 (1): HCT1/CompMod (not supported)
+        - COMP_TYPE_SQUASH (2): Squash/LZW compressed
+        """
+        if block_pos + 8 > len(self.data):
+            return None
+        h1 = struct.unpack("<I", self.data[block_pos + 4 : block_pos + 8])[0]
+        comp_type, _ = parse_h1_field(h1)
+        return comp_type
+
     def _read_uncompressed_data(self, data_offset: int, size: int) -> bytes:
         """Read uncompressed data directly from an offset."""
         if data_offset + size > len(self.data):
@@ -531,41 +546,79 @@ class TBAFSArchive:
 
         Returns (is_multiblock, table_start) where table_start is the
         offset where the block offset table begins.
+
+        Multi-block indices have h0=288 and the offset table at +20.
+        h1 varies (seen: 512, 1536) and may indicate flags or block count.
+        Individual blocks may be compressed (type 2) or raw (type 0).
         """
-        if pos + 32 > len(self.data):
+        if pos + 24 > len(self.data):
             return False, None
 
-        # Single-block LZW has magic at +12
-        if self._check_lzw_magic(pos + 12):
-            return False, None
+        h0, h1 = struct.unpack("<2I", self.data[pos : pos + 8])
 
-        # Multi-block: look for offset table entries pointing to valid LZW blocks
-        for table_start in [pos + 16, pos + 8, pos + 20]:
-            for i in range(8):
-                offset_pos = table_start + i * 4
-                if offset_pos + 4 > len(self.data):
-                    break
-                val = struct.unpack("<I", self.data[offset_pos : offset_pos + 4])[0]
-                if val > 0 and val < len(self.data):
-                    header = val - 4
-                    if header >= 0 and self._check_lzw_magic(header + 12):
-                        return True, table_start
+        # Multi-block index signature: h0=288
+        # Verify by checking if offset table at +20 points to valid blocks
+        if h0 == 288:
+            table_start = pos + 20
+            first_val = struct.unpack("<I", self.data[table_start : table_start + 4])[0]
+            if first_val > 0 and first_val < len(self.data):
+                first_header = first_val - 4
+                comp_type = self._get_block_compression_type(first_header)
+                if comp_type in (COMP_TYPE_RAW, COMP_TYPE_SQUASH):
+                    return True, table_start
+
         return False, None
 
+    def _is_uncompressed_multiblock(self, pos: int) -> bool:
+        """Check if a multi-block index contains uncompressed blocks.
+
+        Looks at the first block's compression type to determine this.
+        All multi-block indices have h0=288, h1=512 - the difference is
+        in the compression type of the individual blocks they point to.
+        """
+        is_multi, table_start = self._is_multiblock_index(pos)
+        if not is_multi or table_start is None:
+            return False
+
+        # Read first block offset and check its compression type
+        first_offset_pos = table_start
+        if first_offset_pos + 4 > len(self.data):
+            return False
+        val = struct.unpack("<I", self.data[first_offset_pos : first_offset_pos + 4])[0]
+        if val == 0 or val >= len(self.data):
+            return False
+
+        first_block = val - 4
+        comp_type = self._get_block_compression_type(first_block)
+        return comp_type == COMP_TYPE_RAW
+
     def _read_multiblock_offsets(self, index_pos: int, table_start: int) -> list[int]:
-        """Read the block header offsets from a multi-block index."""
+        """Read the block header offsets from a multi-block index.
+
+        Validates each offset by checking the block's compression type.
+        """
         offsets = []
-        for i in range(100):  # Max 100 blocks
+        consecutive_zeros = 0
+        for i in range(100):  # Max 100 blocks (32KB each = 3.2MB max file)
             offset_pos = table_start + i * 4
             if offset_pos + 4 > len(self.data):
                 break
             val = struct.unpack("<I", self.data[offset_pos : offset_pos + 4])[0]
             if val == 0:
+                consecutive_zeros += 1
+                # Stop after 2 consecutive zeros (end of offset table)
+                if consecutive_zeros >= 2:
+                    break
                 continue
+            consecutive_zeros = 0
             if val >= len(self.data):
                 continue
             header = val - 4
-            if header >= 0 and self._check_lzw_magic(header + 12):
+            if header < 0:
+                continue
+            # Validate block by checking compression type
+            comp_type = self._get_block_compression_type(header)
+            if comp_type in (COMP_TYPE_RAW, COMP_TYPE_SQUASH):
                 offsets.append(header)
         return sorted(set(offsets))
 
@@ -580,13 +633,32 @@ class TBAFSArchive:
             raise TBAFSExtractionError(f"No valid block offsets found at 0x{index_pos:x}")
 
         result = bytearray()
+        remaining = target_size
+
         for header in offsets:
-            comp_size = struct.unpack("<I", self.data[header + 8 : header + 12])[0]
-            if comp_size <= 0 or comp_size > MAX_COMPRESSED_SIZE:
-                raise TBAFSExtractionError(f"Invalid compressed size {comp_size} at 0x{header:x}")
-            lzw_data = self.data[header + 12 : header + 12 + comp_size]
-            decompressed = self.decompressor.decompress(lzw_data)
-            result.extend(decompressed)
+            comp_type = self._get_block_compression_type(header)
+
+            if comp_type == COMP_TYPE_SQUASH:
+                # Compressed: decompress LZW data
+                comp_size = struct.unpack("<I", self.data[header + 8 : header + 12])[0]
+                if comp_size <= 0 or comp_size > MAX_COMPRESSED_SIZE:
+                    raise TBAFSExtractionError(
+                        f"Invalid compressed size {comp_size} at 0x{header:x}"
+                    )
+                lzw_data = self.data[header + 12 : header + 12 + comp_size]
+                decompressed = self.decompressor.decompress(lzw_data)
+                result.extend(decompressed)
+            elif comp_type == COMP_TYPE_RAW:
+                # Uncompressed: size is in low 24 bits of h1, data at +12
+                h1 = struct.unpack("<I", self.data[header + 4 : header + 8])[0]
+                _, size_field = parse_h1_field(h1)
+                block_size = min(size_field, remaining)
+                result.extend(self.data[header + 12 : header + 12 + block_size])
+                remaining -= block_size
+            else:
+                raise TBAFSExtractionError(
+                    f"Unsupported compression type {comp_type} at 0x{header:x}"
+                )
 
         return bytes(result[:target_size])
 
@@ -613,9 +685,17 @@ class TBAFSArchive:
             if offsets:
                 # Find the last block and skip past it
                 last_header = max(offsets)
-                comp_size = struct.unpack("<I", self.data[last_header + 8 : last_header + 12])[0]
-                if 0 < comp_size < MAX_COMPRESSED_SIZE:
-                    return align_to(last_header + 12 + comp_size)
+                if self._is_uncompressed_multiblock(pos):
+                    # Uncompressed: header value is total block size (including header)
+                    block_size = struct.unpack("<I", self.data[last_header : last_header + 4])[0]
+                    return align_to(last_header + block_size)
+                else:
+                    # Compressed: LZW block with comp_size at header+8
+                    comp_size = struct.unpack("<I", self.data[last_header + 8 : last_header + 12])[
+                        0
+                    ]
+                    if 0 < comp_size < MAX_COMPRESSED_SIZE:
+                        return align_to(last_header + 12 + comp_size)
 
         return None
 
@@ -636,13 +716,33 @@ class TBAFSArchive:
         """Find the data position for a file with a marker block.
 
         Marker files have their data stored in a "shifted" location:
-        - Multi-block markers: data is at the next file's index position
-        - Single-block markers: data is after all sibling files in the same tree
+        - Simple pattern: data is at the next sibling's prev_header position
+        - Multi-block pattern: data is at the next file's multi-block index
+        - End-of-region pattern: data is after all sibling files in the same tree
 
         Returns the block position where data should be extracted from.
         """
-        # Sort all file entries by data_offset to find the next one
         file_entries = [e for e in all_entries if e.is_file]
+
+        # Pattern 1: Next sibling's prev_header (simple single-block markers)
+        # Find siblings in the same directory, sorted by entry offset
+        siblings = sorted(
+            [e for e in file_entries if e.parent_path == entry.parent_path],
+            key=lambda e: e.offset,
+        )
+        for i, sib in enumerate(siblings):
+            if sib.offset == entry.offset and i + 1 < len(siblings):
+                next_sib = siblings[i + 1]
+                if next_sib.data_offset != 0x410:  # Not first-in-block
+                    next_prev = next_sib.data_offset - 4
+                    # Check if it's a simple LZW block (not marker, not multi-block index)
+                    if not self._is_marker_block(next_prev) and self._check_lzw_magic(
+                        next_prev + 12
+                    ):
+                        return next_prev
+                break
+
+        # Pattern 2 & 3: Original logic for multi-block and end-of-region
         sorted_entries = sorted(file_entries, key=lambda e: e.data_offset)
 
         # Find our position in the sorted list
@@ -687,6 +787,9 @@ class TBAFSArchive:
                 if (e.parent_path == our_parent or e.parent_path.startswith(our_parent + "/"))
                 and e.data_offset > our_data_offset
             ]
+            # If no files in tree, fall back to all files (marker points to empty dirs)
+            if not tree_files:
+                tree_files = file_entries
         else:
             # Root level marker: data is at the very END of all archive data
             # Include ALL files (including first-in-block) to find the true end
@@ -718,10 +821,18 @@ class TBAFSArchive:
                     offsets = self._read_multiblock_offsets(block_pos, table)
                     if offsets:
                         last_header = max(offsets)
-                        comp_size = struct.unpack(
-                            "<I", self.data[last_header + 8 : last_header + 12]
-                        )[0]
-                        end = align_to(last_header + 12 + comp_size)
+                        if self._is_uncompressed_multiblock(block_pos):
+                            # Uncompressed: header value is total block size
+                            block_size = struct.unpack(
+                                "<I", self.data[last_header : last_header + 4]
+                            )[0]
+                            end = align_to(last_header + block_size)
+                        else:
+                            # Compressed: LZW block
+                            comp_size = struct.unpack(
+                                "<I", self.data[last_header + 8 : last_header + 12]
+                            )[0]
+                            end = align_to(last_header + 12 + comp_size)
                     else:
                         continue
                 elif h1 > 0 and h1 < 1_000_000:
@@ -732,7 +843,30 @@ class TBAFSArchive:
             if end > last_end:
                 last_end = end
 
-        return last_end if last_end > 0 else None
+        if last_end == 0:
+            return None
+
+        # Special case: if last_end points to a marker block, the actual data
+        # is at the archive end. This happens for the "last" marker file
+        # (highest data_offset) when its data is stored after all other files.
+        if self._is_marker_block(last_end):
+            # Find the LZW block at the archive end by scanning backward
+            # in 16-byte steps (blocks are 16-byte aligned)
+            archive_end = len(self.data)
+            target_size = entry.size
+            for offset in range(16, 512, 16):  # Check up to 512 bytes from end
+                pos = archive_end - offset
+                if pos < 0:
+                    break
+                if self._check_lzw_magic(pos + 12):
+                    h1 = struct.unpack("<I", self.data[pos + 4 : pos + 8])[0]
+                    _, size_field = parse_h1_field(h1)
+                    if size_field == target_size:
+                        return pos
+            # No matching LZW block found at archive end
+            return None
+
+        return last_end
 
     def read_file_data(self, entry: DirEntry, all_entries: list[DirEntry] | None = None) -> bytes:
         """Read and decompress file data for an entry.

@@ -1,6 +1,6 @@
 # TBAFS File Format Specification
 
-This document describes the TBAFS archive format, a proprietary format created by TBA Software for RISC OS computers. This specification was reverse-engineered from sample archives.
+This document describes the TBAFS archive format, a proprietary format created by TBA Software for RISC OS computers. This specification was reverse-engineered from sample archives and validated against disassembly of the TBAFSModR RISC OS module.
 
 ## Overview
 
@@ -26,18 +26,20 @@ TBAFS (TBA Filing System) is a high-performance archive format featuring:
 +------------------+
 ```
 
-## Header
+## Archive Header
 
 | Offset | Size | Description |
 |--------|------|-------------|
 | 0x00 | 4 | Magic number: `TAFS` (0x53464154 LE) |
-| 0x04 | 4 | Root directory allocation size |
-| 0x08 | 4 | Unknown (typically 0x10) |
-| 0x0C | 4 | Directory header size (typically 0x90 = 144) |
+| 0x04 | 4 | Version/constant: must be 0xC8 (200) |
+| 0x08 | 4 | Unknown constant: 0x10 (16) |
+| 0x0C | 4 | Directory header size: 0x90 (144) |
 | 0x10 | 4 | Reserved (zero) |
 | 0x14 | 4 | Reserved (zero) |
-| 0x18 | 4 | First entry offset (approx.) |
+| 0x18 | 4 | Unknown |
 | 0x1C | 4 | Entry count in root directory |
+
+Note: The module validates bytes 4-7 == 0xC8 as a version check.
 
 ## Directory Entry (64 bytes)
 
@@ -50,8 +52,10 @@ Each file or directory is described by a 64-byte entry:
 | 0x08 | 4 | RISC OS load address |
 | 0x0C | 4 | RISC OS exec address |
 | 0x10 | 4 | Uncompressed file size (0 for directories) |
-| 0x14 | 4 | Flags (3 = Squash compressed) |
+| 0x14 | 4 | Flags/attributes |
 | 0x18 | 24 | Filename (null-terminated) |
+
+**Note on compression**: The compression type is NOT stored in the directory entry flags. It is encoded in the **data block header** (h1 high byte). The flags field at offset 0x14 appears to be RISC OS file attributes.
 
 ### Data Offset Field
 
@@ -81,47 +85,66 @@ Common filetypes:
 
 ## Data Storage Formats
 
-TBAFS supports two storage formats: compressed (LZW) and uncompressed.
+TBAFS supports multiple storage formats, identified by a **compression type** encoded in the data block header.
 
-### Compressed Data Block (12-byte header)
+### Data Block Header (12 bytes)
 
-Compressed data is stored in blocks, each prefixed by a 12-byte header:
-
-| Offset | Size | Description |
-|--------|------|-------------|
-| 0x00 | 4 | Workspace size (not actual decompressed size) |
-| 0x04 | 4 | Flags (typically 0x020001xx) |
-| 0x08 | 4 | Compressed data size |
-
-Immediately following the header is the LZW-compressed data (magic `1F 9D 8C`).
-
-### Uncompressed Data Block (8-byte header)
-
-Some directories store files uncompressed with an 8-byte header:
+All data blocks share a common 12-byte header structure:
 
 | Offset | Size | Description |
 |--------|------|-------------|
-| 0x00 | 4 | Aligned size (rounded up, typically 16-byte aligned) |
-| 0x04 | 4 | Actual file size (matches directory entry) |
+| 0x00 | 4 | h0: Workspace/buffer size |
+| 0x04 | 4 | h1: Packed field: `(compression_type << 24) \| size_field` |
+| 0x08 | 4 | h2: Compressed data size (for type 2) or other |
 
-File data follows immediately at header + 8.
+### Compression Types (from disassembly)
+
+The **high byte of h1** (bits 24-31) indicates the compression type:
+
+| Type | h1 Pattern | Description |
+|------|------------|-------------|
+| 0 | `0x00xxxxxx` | Raw/uncompressed data |
+| 1 | `0x01xxxxxx` | HCT1/CompMod compressed (different from Squash) |
+| 2 | `0x02xxxxxx` | Squash compressed (LZW) |
+
+**Type 1 (HCT1)**: The module checks for "HCT1" magic at the start of the compressed data. This is a different compression format (CompMod) from Squash. Not yet supported by this extractor.
+
+### Type 2: Squash Compressed Block
+
+For compressed blocks (h1 high byte = 0x02):
+- h0: Workspace size for decompression
+- h1: `0x02xxxxxx` where low 24 bits = size field
+- h2: Compressed data size in bytes
+- Offset +12: LZW data starts (magic `1F 9D 8C`)
+
+Example: `h1 = 0x02000113` → type=2 (compressed), size_field=275
+
+### Type 0: Raw/Uncompressed Block
+
+For uncompressed blocks (h1 high byte = 0x00):
+- h0: Buffer/workspace size
+- h1: `0x00xxxxxx` where **low 24 bits = actual file size**
+- h2: May contain additional size info
+- Offset +12: Raw file data starts
+
+Example: `h1 = 0x00000ccd` → type=0 (raw), size=3277 bytes
 
 ### Detecting Storage Format
 
-To determine which format is used:
-1. Check for LZW magic (`1F 9D`) at header + 12
-2. If present: compressed block (12-byte header + LZW data)
-3. If absent: uncompressed block (8-byte header + raw data)
+To determine compression type without heuristics:
+```python
+h1 = read_u32(block_header + 4)
+compression_type = (h1 >> 24) & 0xFF
+size_field = h1 & 0xFFFFFF
 
-### Sequential Uncompressed Storage
-
-When a directory uses uncompressed storage:
-1. The first file's data_offset is a relative value (e.g., `0x410`)
-2. Calculate first header: `entry_offset + data_offset`
-3. Files are stored sequentially, each 16-byte aligned
-4. Extract by: read 8-byte header, extract `h1` bytes, advance to next 16-byte boundary
-
-Note: Subsequent files' data_offset values point to the previous file's h1 field - this appears to be for validation/recovery, not for direct extraction.
+if compression_type == 2:
+    # Squash compressed: read h2 for compressed size
+    comp_size = read_u32(block_header + 8)
+    lzw_data = data[block_header + 12 : block_header + 12 + comp_size]
+elif compression_type == 0:
+    # Raw: size_field is the actual file size
+    raw_data = data[block_header + 12 : block_header + 12 + size_field]
+```
 
 ## Compression Format
 
@@ -181,9 +204,11 @@ A type value of `0xFFFFFFFF` marks the end of an entry block in a directory. How
 ## Example: Parsing a TBAFS Archive
 
 ```python
-# Read header
+# Read and validate header
 magic = file.read(4)
 assert magic == b'TAFS'
+version = struct.unpack('<I', file[4:8])[0]
+assert version == 0xC8  # Required by module
 
 # Find root entries
 dir_header_size = struct.unpack('<I', file[0x0C:0x10])[0]
@@ -195,15 +220,21 @@ data_offset = struct.unpack('<I', entry[0:4])[0]
 entry_type = struct.unpack('<I', entry[4:8])[0]
 load_addr = struct.unpack('<I', entry[8:12])[0]
 size = struct.unpack('<I', entry[16:20])[0]
-flags = struct.unpack('<I', entry[20:24])[0]
 name = entry[24:48].split(b'\x00')[0].decode('latin-1')
 
 # Extract file data
-if entry_type == 1 and flags == 3:  # Compressed file
+if entry_type == 1:  # File
     block_header = data_offset - 4
-    comp_size = struct.unpack('<I', file[block_header+8:block_header+12])[0]
-    lzw_data = file[block_header+12:block_header+12+comp_size]
-    # Decompress using 12-bit LZW
+    h1 = struct.unpack('<I', file[block_header+4:block_header+8])[0]
+    compression_type = (h1 >> 24) & 0xFF
+
+    if compression_type == 2:  # Squash compressed
+        comp_size = struct.unpack('<I', file[block_header+8:block_header+12])[0]
+        lzw_data = file[block_header+12:block_header+12+comp_size]
+        # Decompress using 12-bit LZW
+    elif compression_type == 0:  # Raw
+        file_size = h1 & 0xFFFFFF
+        raw_data = file[block_header+12:block_header+12+file_size]
 ```
 
 ## Marker Blocks and Deferred Data
@@ -216,9 +247,15 @@ Some files have their data stored in a "deferred" location rather than immediate
 |--------|------|-------------|
 | 0x00 | 4 | Always 0x90 (144) - equals HEADER_SIZE |
 | 0x04 | 4 | Always 0x00 |
-| 0x08+ | varies | Additional fields (may contain offsets) |
+| 0x08 | 4 | Reserved (0) |
+| 0x0C | 4 | Offset to first directory entry's type field |
+| 0x10 | 4 | Count of directory entries in first block |
+| 0x14 | 4 | Offset to second entry block (0 if none) |
+| 0x18 | 4 | Count of entries in second block (0 if none) |
 
 A marker block is identified by: `h0 == 144 && h1 == 0`
+
+The +12 and +16 fields describe directory entries that follow this marker block. The marker file's actual data is stored AFTER these directory entries.
 
 ### Finding Deferred Data
 
@@ -232,6 +269,8 @@ The location of a marker file's data depends on the file size:
 **Small files (≤ 32KB)**: Data at **end of region**
 - For non-root files: Data follows all files that come AFTER this marker in data_offset order (within the same directory tree)
 - For root-level files: Data is at the very END of all archive data
+
+**Last marker by data_offset**: If the marker is the last file in data_offset order (no files come after), its data is stored at the **very end of the archive file**. The LZW block ends exactly at the archive's file size boundary (16-byte aligned). To find this block, scan backward from the archive end in 16-byte steps until finding LZW magic (1F 9D) with a size_field matching the expected file size.
 
 ### Multi-Block Index Structure
 
@@ -275,8 +314,12 @@ For files with `data_offset == 0x410`:
 - [RISC OS Squash documentation](http://riscos.com/support/developers/prm/squash.html)
 - [Unix compress format](http://fileformats.archiveteam.org/wiki/Compress_(Unix))
 - [TBAFS on Archive Team](http://fileformats.archiveteam.org/wiki/TBAFS)
+- `docs/NotesFromDisassembly.md` - Disassembly notes from TBAFSModR,ffa module
 
 ## Version History
 
+- 2026-01-19: Documented marker block extended structure (+12/+16 fields)
+- 2026-01-19: Added "last marker at archive end" pattern for final marker files
+- 2026-01-19: Major update from disassembly - compression type in h1 high byte, not entry flags
 - 2026-01-19: Added marker blocks, deferred data, and data location algorithm
 - 2026-01-18: Initial reverse-engineered specification
