@@ -4,10 +4,13 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^comparison/
       - id: end-of-file-fixer
+        exclude: ^comparison/
       - id: check-yaml
       - id: check-added-large-files
       - id: mixed-line-ending
+        exclude: ^comparison/
       - id: detect-private-key
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.6
