@@ -71,8 +71,8 @@ Each file or directory is described by a 64-byte entry:
 The load address encodes the filetype when bits 20-31 are 0xFFF:
 ```
 0xFFFttthh
-    ^^^
-    filetype (12 bits)
+     ^^^
+     filetype (12 bits)
 ```
 
 Common filetypes:
