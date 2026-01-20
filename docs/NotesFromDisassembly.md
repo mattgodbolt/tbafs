@@ -104,8 +104,20 @@ Each directory entry is **64 bytes** (0x40), stored at workspace offset 0x1d0.
 
 | Offset | Size | Description |
 |--------|------|-------------|
-| 0x00 | 4 | Status/offset (0xFFFFFFFF = empty/end marker) |
-| 0x14 | 20+ | Filename (used for lookup comparison) |
+| 0x00 | 4 | **Entry type**: 1=file, 2=directory, 0xFFFFFFFF=end marker |
+| 0x04 | 4 | RISC OS load address |
+| 0x08 | 4 | RISC OS exec address |
+| 0x0C | 4 | Uncompressed file size |
+| 0x10 | 4 | RISC OS attributes |
+| 0x14 | 20 | **Filename** (null-terminated, starts here per 0x1b38 comparison) |
+| 0x28 | 20 | Reserved/unknown fields |
+| 0x3c | 4 | **Data block position** (absolute file offset, used at 0x1fac) |
+
+**Key Findings**:
+- Entry[0x00] is the type field, checked against 2 (directory) at 0x1cc4 and against -1 (end marker) at 0x1b30
+- Entry[0x14] is where filename comparison starts (code at 0x1b38: `add r0, r8, 0x14`)
+- Entry[0x3c] contains the data block position, loaded via `[ip, 0x60c]` at 0x1fac
+- Root entry table position is read from **header[0x18]** (code at 0x1c8-0x1cc), typically 0x114
 
 The entry copy function at 0x1ce8 copies all 64 bytes:
 ```arm
@@ -235,15 +247,143 @@ The module validates the first 8 bytes of the archive header:
 - "Unknown Compression Type"
 - "Cache Size Too Small"
 
+## Marker Block Investigation
+
+**Question**: When the module encounters a marker block (h0=144, h1=0) at a file's data_offset position, how does it find the actual data?
+
+**Findings from disassembly**:
+
+The TBAFSModR module does NOT appear to have explicit marker block detection. The compression type dispatch code at 0x1e58-0x1e84:
+
+1. Reads 4 bytes from the file position passed in r0/r4
+2. Extracts compression type from high byte
+3. Dispatches to handler based on type (0, 1, or 2)
+
+There is no check for `h0=144, h1=0` in the disassembly. The module seems to expect valid compression type data at every position it reads from.
+
+**Implications**:
+
+The "marker block" concept described in FORMAT.md may be:
+1. An artifact of how write-capable TBAFS versions organize data during archive creation
+2. Something the Python extractor had to work around based on observed archive structure
+3. NOT something the read-only module handles specially - it may rely on the archive being created correctly
+
+The module tracks file position through:
+- Workspace offset 0x18: File handle
+- Caching at 0x9d0 and 0xae0: Two alternating 272-byte cache blocks
+- Position passed as r0/r4 to the read functions
+
+**Data Position Calculation**:
+- The directory block table at workspace+0x50 (8 bytes per entry, up to 15 entries)
+- These entries contain disk positions and counts for directory entry blocks
+- The data_offset field from entries appears to be used directly for seeking
+
+## Root Directory Lookup (NEW FINDING)
+
+**Location**: 0x1af4, 0x1c64-0x1cd8
+
+The module handles root directories by treating the **file header as a block table**.
+
+### Mechanism
+
+When looking up entries in the root directory:
+
+1. `workspace+0x48` is set to 0 for root (code at 0xcd0-0xcd4)
+2. Function 0x1af4 is called with r0 = 0
+3. Function 0x204c reads 128 bytes from position 0 (the header) into workspace+0x50
+4. The code at 0x1b10 iterates through "block indices" at 8-byte intervals:
+
+```arm
+0x1b0c: mov r2, 1                   ; Start at index 1 (not 0!)
+0x1b10: ldr r0, [sl, r2, lsl 3]     ; r0 = [block_table + r2*8]
+0x1b14: cmp r0, 0                   ; Check if position is 0
+0x1b18: beq 0x1b54                  ; If 0, skip to next index
+0x1b1c: bl 0x2070                   ; Read entries from position r0
+```
+
+### How Header Works as Block Table
+
+The header structure is interpreted as a block table:
+
+| Header Offset | Value | Block Table Interpretation |
+|---------------|-------|---------------------------|
+| 0x00 | "TAFS" | [+0] Next block pointer (nonzero) |
+| 0x08 | 0x10 | [+8] First entry position |
+| 0x10 | 0 | [+16] Second position (skipped) |
+| 0x18 | 0x114 | [+24] Third position (ACTUAL ENTRIES) |
+
+The module:
+1. Tries position 0x10 (header[0x08]) - finds garbage/zeros, no filename match
+2. Skips position 0 (header[0x10])
+3. Tries position 0x114 (header[0x18]) - finds real entries!
+
+### Continuation Check
+
+At 0x1b60-0x1b68, the code checks for continuation:
+```arm
+0x1b60: ldr r0, [sl]                ; r0 = block_table[0] = header[0x00] = "TAFS"
+0x1b64: cmp r0, 0
+0x1b68: bne 0x1b04                  ; If not 0, read next block table
+```
+
+Since "TAFS" != 0, this would try to continue if no match is found. However, the real entries at 0x114 are found before this happens.
+
+## File Data Position Reading
+
+**Location**: 0x1f9c-0x2000
+
+For file data, the module reads `entry[0x3c]` directly:
+
+```arm
+0x1fac: ldr r0, [ip, 0x60c]         ; r0 = entry[0x3c] (data position)
+0x1fb0: ldrb r1, [ip, 0x60b]        ; r1 = entry[0x3b] (mode byte)
+0x1fc8: cmp r1, 2                   ; Check if mode == 2
+0x1fcc: bne 0x1ffc                  ; If not, skip multi-block handling
+; ... multi-block index traversal ...
+0x1ffc: cmp r0, r0                  ; NOP (sets equal flag)
+0x2000: pop {r1, r2, r3, r4, pc}    ; Return with r0 = data position
+```
+
+- **Mode != 2**: entry[0x3c] is returned directly as data block position
+- **Mode == 2**: Multi-block index traversal at 0x1fd0-0x1ff8
+
+## Confirmed Module Behavior
+
+I've traced the complete entry reading chain with no offsets found:
+
+1. **Block table read (0x204c)**: Reads 128 bytes from position r0 into workspace+0x50. No offset.
+2. **Entry position from block table (0x1b10)**: `ldr r0, [sl, r2, lsl 3]` - reads position directly from block_table[r2*8]
+3. **Entry read (0x2070)**: Reads 1024 bytes from position r0 into workspace+0x1d0. No offset.
+4. **Entry copy (0x1ce8)**: `add r8, sb, r4, lsl 6` - copies from entries_base + index*64. No offset.
+5. **Data position access (0x1fac)**: `ldr r0, [ip, 0x60c]` - reads entry[0x3c] directly.
+
+For root directory (position 0 = header as block table):
+- block_table[24] = header[0x18] = 0x114
+- Entry 1 is at workspace+0x210 = file[0x154]
+- Entry 1's [0x3c] = file[0x190]
+
+**The module reads file[0x190] as ReadME's data position.** Since the module works, this value (reported as 0x43914) must be valid.
+
+The apparent discrepancy where the OLD Python code worked with entry[N-1][0x3c] as entry[N]'s data suggests either:
+1. The hex dump interpretation of file[0x190] was incorrect
+2. 0x43914 IS valid but was misanalyzed (wrong interpretation of what's at that position)
+3. The archive structure in Blurp.b21 differs from what was expected
+
+**Key insight**: The module's behavior is confirmed correct. Any discrepancy is in the interpretation of the archive data, not in the module's code
+
 ## Questions / Unknowns
 
-1. The exact layout of the on-disk directory entry vs the in-memory format
-2. How the "data_offset" field in entries maps to actual file positions
-3. The meaning of the directory block table entries (8 bytes each)
+1. ~~The exact layout of the on-disk directory entry vs the in-memory format~~ **ANSWERED**: 64 bytes, layout confirmed in entry structure section
+2. ~~How the "data_offset" field in entries maps to actual file positions~~ **PARTIALLY ANSWERED**: entry[0x3c] is used directly, but contradiction exists with test data
+3. ~~The meaning of the directory block table entries (8 bytes each)~~ **ANSWERED**: Position at offset 0, count at offset 4, iterated at 8-byte intervals
 4. ~~Whether type 1 compression is a variant or something else entirely~~ **ANSWERED**: Type 1 is HCT1/CompMod format, a completely different compression scheme with its own built-in decompressor
-5. The structure of multi-block file indices (partial answer: 32KB blocks, loop at 0xc24-0xc78)
+5. ~~The structure of multi-block file indices~~ **ANSWERED**: Mode byte at entry[0x3b]=2 triggers multi-block handling at 0x1fd0-0x1ff8
+6. **NEW**: The read-only module does NOT appear to handle marker blocks - this may be a write-side concept only
+7. **NEW**: Why does entry[0x3c] appear to contain garbage for files in test archives?
 
 ## Files Generated
 
 - `TBAFSModR_disasm.txt` - Raw radare2 disassembly
 - `TBAFSModR_annotated.txt` - Disassembly with header documentation
+- `tmp/DisassemblyFindings.md` - Detailed analysis of root lookup and entry structure
+- `tmp/AnswersFromDisassembly.md` - Responses to questions from file analysis
