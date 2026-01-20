@@ -95,6 +95,7 @@ The **high byte of h0** indicates the compression type:
 | Type | h0 Pattern | Description |
 |------|------------|-------------|
 | 0 | `0x00xxxxxx` | Raw/uncompressed data |
+| 1 | `0x01xxxxxx` | HCT1 compressed (Huffman) - **speculative, untested** |
 | 2 | `0x02xxxxxx` | Squash compressed (LZW) |
 
 ### Type 2: Squash Compressed Block (8-byte header)
@@ -122,6 +123,39 @@ Example: `h0 = 0x00000ccd` → type=0 (raw), size=3277 bytes
 
 **Important**: Raw blocks have only a 4-byte header, with data starting at +4, NOT +8.
 
+### Type 1: HCT1 Compressed Block (8-byte header) - SPECULATIVE
+
+> **Warning**: This section is derived from disassembly analysis only. No archives using Type 1 compression have been found for testing. Treat this documentation as speculative until verified against real data.
+
+For HCT1 compressed blocks (h0 high byte = 0x01):
+
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 | 4 | h0: `(0x01 << 24) \| uncompressed_size` |
+| 0x04 | 4 | h1: Compressed data size in bytes |
+| 0x08 | N | HCT1 compressed data |
+
+**HCT1 Format Details** (from disassembly at 0xefc-0x1700):
+
+- Internal magic signature: "HCT1" (0x31544348 little-endian) at module offset 0xf10
+- Huffman-based compression algorithm
+- Decompression implemented entirely within the TBAFSModR module (no external SWI calls)
+
+**Decompression stages** (traced from disassembly):
+
+1. **Initialization** (0x14d0): Set up decode state
+2. **Frequency counting** (0xfb0-0x1150): Build 256-entry byte histogram from compressed data
+3. **Huffman tree construction** (0x1264-0x1488): Build canonical Huffman decode tables
+4. **Bitstream decoding** (0x1678+): Traverse Huffman tree bit-by-bit to emit output bytes
+
+**Key observations**:
+- Uses canonical Huffman coding (code lengths stored, not explicit tree)
+- 256-symbol alphabet (one per byte value)
+- Tree traversal at 0x15e4 uses `lsrs r2, r2, 1` for bit extraction
+- Decode tables stored in module workspace
+
+**Why HCT1 might exist**: Huffman compression is faster to decompress than LZW but typically achieves lower compression ratios. HCT1 may have been used for files where decompression speed was prioritized over archive size.
+
 ### Detecting Storage Format
 
 ```python
@@ -133,6 +167,11 @@ if compression_type == 2:
     # Squash compressed: 8-byte header, h1 = compressed size
     comp_size = read_u32(block_header + 4)
     lzw_data = data[block_header + 8 : block_header + 8 + comp_size]
+elif compression_type == 1:
+    # HCT1 compressed: 8-byte header, h1 = compressed size (SPECULATIVE)
+    comp_size = read_u32(block_header + 4)
+    hct1_data = data[block_header + 8 : block_header + 8 + comp_size]
+    # Requires HCT1 Huffman decompressor - not yet implemented
 elif compression_type == 0:
     # Raw: 4-byte header, data starts at +4
     raw_data = data[block_header + 4 : block_header + 4 + uncomp_size]
@@ -275,8 +314,9 @@ The `data_position` field (entry[0x3c]) points directly to the data block header
 
 1. Read h0 at data_position
 2. Determine compression type: `comp_type = (h0 >> 24) & 0xFF`
-3. For compressed (type 2): read h1 for compressed size, data at +8
-4. For raw (type 0): data at +4, size is h0 & 0xFFFFFF
+3. For Squash compressed (type 2): read h1 for compressed size, data at +8
+4. For HCT1 compressed (type 1): read h1 for compressed size, data at +8 (speculative)
+5. For raw (type 0): data at +4, size is h0 & 0xFFFFFF
 
 ### Multi-Block Files
 
@@ -303,6 +343,7 @@ Multi-block files are identified by a **mode byte** at entry offset 0x3B. When `
 
 ## Version History
 
+- 2026-01-20: Added speculative documentation for Type 1 (HCT1) Huffman compression, derived from disassembly analysis. No test archives available - treat as unverified.
 - 2026-01-20: **Major revision**: Documented correct block header formats (8-byte for compressed, 4-byte for raw). Documented multi-block index format (h0 = num_blocks × 256). Documented directory block header format with entry block positions. Removed incorrect marker block documentation - those structures are actually directory block headers.
 - 2026-01-20: **Critical fix**: Corrected entry layout from disassembly. Entry[0x00]=type, entry[0x14]=filename (20 bytes), entry[0x3c]=data position. Root entry table position is read from header[0x18], not hardcoded.
 - 2026-01-18: Initial reverse-engineered specification
