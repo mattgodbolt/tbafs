@@ -40,7 +40,6 @@ ENTRY_TYPE_END = 0xFFFFFFFF
 MAX_ENTRIES_PER_BLOCK = 16
 
 # Multi-block index constants (from disassembly: 0x2094-0x20a4)
-MULTIBLOCK_INDEX_SIZE = 0x110  # 272 bytes read for index
 MULTIBLOCK_OFFSETS_START = 0x10  # Block offsets begin at index+0x10
 
 # Mode byte values (from disassembly: cmp r1, 2 at 0x1fc8)
@@ -378,7 +377,7 @@ class TBAFSArchive:
             # Root directory: entry table offset comes from header[0x18]
             start_offset = self.header.entry_table_offset
 
-            # Collect root entries using header count, with max 16 per block safety limit
+            # Collect root entries: header specifies count, but module limits to 16 per block
             # (from disassembly: cmp r4, 0x10 at 0x1b4c)
             root_entries = []
             offset = start_offset
@@ -513,7 +512,7 @@ class TBAFSArchive:
             )
 
         # Block count is in byte 1: (h0 >> 8) & 0xFF when byte 0 is 0
-        # We don't need it since the loop reads until target_size or offset 0
+        # Loop terminates when we have enough data OR hit a zero offset (both are format-valid)
 
         result = bytearray()
         offset_pos = index_pos + MULTIBLOCK_OFFSETS_START
