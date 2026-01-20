@@ -49,7 +49,8 @@ python3 tbafs.py extract samples/Blurp.b21 --adfs ./tmp/test.adf
 
 # Verify ADFS image size (E format = 819200 bytes)
 # Note: avoid stat as it can hang on stale NFS mounts
-SIZE=$(wc -c < ./tmp/test.adf)
+# Apply sed, as BSD 'wc' space-pads the count.
+SIZE=$(wc -c < ./tmp/test.adf | sed -e 's/^ *//')
 if [ "$SIZE" = "819200" ]; then
     echo "✓ ADFS image size correct: $SIZE bytes"
 else
