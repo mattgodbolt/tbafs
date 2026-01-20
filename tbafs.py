@@ -327,16 +327,6 @@ class TBAFSArchive:
             parent_path=parent_path,
         )
 
-    def _is_valid_entry(self, entry: DirEntry | None) -> bool:
-        """Check if an entry is valid (not end marker or null).
-
-        Entry validation is straightforward per disassembly - the format
-        provides explicit entry counts, so we just check the entry type.
-        """
-        if not entry:
-            return False
-        return entry.entry_type in (ENTRY_TYPE_FILE, ENTRY_TYPE_DIR)
-
     def _get_dir_entry_blocks(self, entry: DirEntry) -> list[tuple[int, int]]:
         """
         Get all entry block positions for a directory.
@@ -396,8 +386,7 @@ class TBAFSArchive:
                 entry = self._parse_entry(offset, parent_path)
                 if entry is None or entry.is_end:
                     break
-                if self._is_valid_entry(entry):
-                    root_entries.append(entry)
+                root_entries.append(entry)
                 offset += ENTRY_SIZE
 
             # Yield root entries and recurse into directories
@@ -420,8 +409,7 @@ class TBAFSArchive:
                     entry = self._parse_entry(offset, parent_path)
                     if entry is None or entry.is_end:
                         continue
-                    if self._is_valid_entry(entry):
-                        entries.append(entry)
+                    entries.append(entry)
 
             # Yield entries and recurse into subdirectories
             for entry in entries:
