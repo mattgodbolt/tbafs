@@ -79,7 +79,11 @@ Common filetypes:
 - 0xFFA = Module
 - 0xFEB = Obey (script)
 
-## Data Block Header (12 bytes)
+## Data Storage Formats
+
+TBAFS supports two storage formats: compressed (LZW) and uncompressed.
+
+### Compressed Data Block (12-byte header)
 
 Compressed data is stored in blocks, each prefixed by a 12-byte header:
 
@@ -89,7 +93,35 @@ Compressed data is stored in blocks, each prefixed by a 12-byte header:
 | 0x04 | 4 | Flags (typically 0x020001xx) |
 | 0x08 | 4 | Compressed data size |
 
-Immediately following the header is the LZW-compressed data.
+Immediately following the header is the LZW-compressed data (magic `1F 9D 8C`).
+
+### Uncompressed Data Block (8-byte header)
+
+Some directories store files uncompressed with an 8-byte header:
+
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 | 4 | Aligned size (rounded up, typically 16-byte aligned) |
+| 0x04 | 4 | Actual file size (matches directory entry) |
+
+File data follows immediately at header + 8.
+
+### Detecting Storage Format
+
+To determine which format is used:
+1. Check for LZW magic (`1F 9D`) at header + 12
+2. If present: compressed block (12-byte header + LZW data)
+3. If absent: uncompressed block (8-byte header + raw data)
+
+### Sequential Uncompressed Storage
+
+When a directory uses uncompressed storage:
+1. The first file's data_offset is a relative value (e.g., `0x410`)
+2. Calculate first header: `entry_offset + data_offset`
+3. Files are stored sequentially, each 16-byte aligned
+4. Extract by: read 8-byte header, extract `h1` bytes, advance to next 16-byte boundary
+
+Note: Subsequent files' data_offset values point to the previous file's h1 field - this appears to be for validation/recovery, not for direct extraction.
 
 ## Compression Format
 
@@ -174,11 +206,69 @@ if entry_type == 1 and flags == 3:  # Compressed file
     # Decompress using 12-bit LZW
 ```
 
+## Marker Blocks and Deferred Data
+
+Some files have their data stored in a "deferred" location rather than immediately following their directory entry. These files are identified by a **marker block** at their data_offset position.
+
+### Marker Block Structure
+
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 | 4 | Always 0x90 (144) - equals HEADER_SIZE |
+| 0x04 | 4 | Always 0x00 |
+| 0x08+ | varies | Additional fields (may contain offsets) |
+
+A marker block is identified by: `h0 == 144 && h1 == 0`
+
+### Finding Deferred Data
+
+The location of a marker file's data depends on the file size:
+
+**Large files (> 32KB)**: Use the **shifted index pattern**
+- Data is stored at the next file's multi-block index position
+- Scan forward in data_offset order to find the next non-marker file's multi-block index
+- That index contains the marker file's data blocks
+
+**Small files (≤ 32KB)**: Data at **end of region**
+- For non-root files: Data follows all files that come AFTER this marker in data_offset order (within the same directory tree)
+- For root-level files: Data is at the very END of all archive data
+
+### Multi-Block Index Structure
+
+Large files use a multi-block index containing a table of block offsets:
+
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 | 4 | Index header (typically 288 = 0x120) |
+| 0x04 | 4 | Some count or flags |
+| 0x10+ | 4×N | Table of block offsets (each offset - 4 = block header) |
+
+Each offset in the table points to an LZW block. Decompress all blocks in order and concatenate.
+
+## Data Location Algorithm
+
+For files with `data_offset ≠ 0x410`:
+1. Compute `prev_header = data_offset - 4`
+2. Check block type at `prev_header`:
+   - **LZW block**: Magic `1F 9D` at +12 → skip past (header + 12 + comp_size, aligned)
+   - **Uncompressed block**: `h1` = file size → skip past (header + 8 + h1, aligned)
+   - **Multi-block index**: Offset table entries → find last block end, skip past
+   - **Marker block**: `h0=144, h1=0` → use deferred data algorithm
+3. Our data starts at the position after skipping past the previous block
+
+For files with `data_offset == 0x410`:
+- This is a **first-in-block** file
+- Block position is: `entry.offset + entry.data_offset`
+
 ## Implementation Notes
 
-1. **First file sentinel**: The first file in each directory often has a data_offset pointing to the directory block rather than its data. Use fallback methods (size matching) to locate its actual data.
+1. **Relative data_offset**: The first file in a directory group has data_offset `0x410`. Add this to the entry's offset to find the data block header: `entry.offset + 0x410`.
 
 2. **Global boundary calculation**: To correctly parse all entries, first scan the entire archive to find all directories, then use their data_offsets as boundaries when parsing each directory's contents.
+
+3. **Mixed compression**: A single directory may contain both compressed (LZW) and uncompressed files. Check each block's magic bytes to determine the format.
+
+4. **Marker file ordering**: Marker files' data is interleaved with regular data based on data_offset ordering. A marker's data goes after all non-marker files with higher data_offsets (within the tree) have their data.
 
 ## References
 
@@ -188,4 +278,5 @@ if entry_type == 1 and flags == 3:  # Compressed file
 
 ## Version History
 
+- 2026-01-19: Added marker blocks, deferred data, and data location algorithm
 - 2026-01-18: Initial reverse-engineered specification

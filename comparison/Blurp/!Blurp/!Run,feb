@@ -1,0 +1,15 @@
+|   _____________________________________________
+|             __             __   __
+|    \       |__| |    |  | |__| |__|  |       /
+|    /       |__| |__  |__| |  \ |     .       \
+|   _____________________________________________
+|
+|             © Equinox Software 1994
+|    (Richard Talbot-Watkins / Matthew Godbolt)
+
+Set Blurp$Dir <Obey$Dir>
+Set Blurp$Path <Blurp$Dir>.,<Blurp$Dir>.Graphics.,<Blurp$Dir>.Makers.,<Blurp$Dir>.Sprites.,<Blurp$Dir>.SourceCode.,<Blurp$Dir>.Samples.
+IconSprites Blurp:!Sprites
+WimpSlot -min 896K -max 896K
+WimpSlot -min 800K -max 800K
+Run Blurp:!RunImage

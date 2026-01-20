@@ -1,0 +1,5 @@
+Set Blurp$Dir <Obey$Dir>
+Set Blurp$Path <Blurp$Dir>.,<Blurp$Dir>.Graphics.,<Blurp$Dir>.Makers.,<Blurp$Dir>.Sprites.,<Blurp$Dir>.SourceCode.,<Blurp$Dir>.Samples.
+Dir <Blurp$Dir>
+Set Alias$Dis Load Blurp:!RunImage|MMemoryI PC -16 +32|MEcho|MShowRegs
+IconSprites Blurp:!Sprites

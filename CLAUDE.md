@@ -4,7 +4,13 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 
 ## Project Status
 
-**Status:** Complete - Full extraction working, all files extracted correctly
+**Status:** In progress - Fixing marker file extraction (JukeboxMod, ScrollText, ReadME)
+
+## Reference Files
+
+- **comparison/Blurp/**: Contains correctly extracted Blurp archive for comparison
+- Filenames use RISC OS format: `filename,filetype` (e.g., `!Boot,feb` where 0xfeb = Obey file)
+- Graphics files are type 0x004 (sprite files)
 
 ## Key Discoveries
 
@@ -36,6 +42,26 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 - Each directory owns entries between its data_offset and next directory's data_offset
 - Scan at 16-byte intervals within bounded range
 - End markers (0xFFFFFFFF) don't terminate search - continue scanning for more blocks
+
+### Data Location Algorithm (IMPORTANT - "Shifted Index" Pattern)
+
+**General pattern**: `data_offset` points to `prev_block_header + 4`. Skip past the previous block to find our data.
+
+**Multi-block files have a "shifted index" pattern**:
+- Each multi-block file's index contains data for the PREVIOUS multi-block file, not itself
+- Example: LEVELS index at 0x20d00 contains JukeboxMod data; NiceDrums index contains LEVELS data
+- To find a multi-block file's data, skip past its prev_header to the NEXT file's index position
+
+**Marker blocks** (h0=144, h1=0):
+- Some files have a "marker" at their prev_header instead of actual data
+- These marker files have their data at the END of the region they skip over
+- JukeboxMod: marker, data at LEVELS' index position (skip-past finds it correctly)
+- ScrollText: marker, raw data after all Samples files
+- ReadME: marker, LZW data at very end of archive (after Ooh (Rev))
+
+**Data offset interpretations**:
+- `data_offset = 0x410`: First file in block, relative offset (header = entry + 0x410)
+- `data_offset != 0x410`: Absolute offset to prev_header + 4 (header = data_offset - 4)
 
 ## File Structure
 
@@ -82,8 +108,10 @@ find tmp/extracted -type f | wc -l              # Count files (should be 49)
 ## Claude Code Preferences
 
 - **Do NOT use `python3 -c '...'`** - Write test scripts to `./tmp/` and run those instead
+- **Do NOT use `cat` or heredocs to create files** - Use the Write tool instead
 - Use `./tmp/` for all temporary files and test outputs
 - Use virtual environments for any pip installs (e.g., `./tmp/venv/`)
+- **No heuristics or fallbacks** - The format should have a simple, parsimonious explanation
 
 ## References
 
