@@ -4,7 +4,7 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 
 ## Project Status
 
-**Status:** In progress - Fixing marker file extraction (JukeboxMod, ScrollText, ReadME)
+**Status:** Stable - Disassembly findings encoded into code and documentation
 
 ## Reference Files
 
@@ -12,7 +12,7 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 - Filenames use RISC OS format: `filename,filetype` (e.g., `!Boot,feb` where 0xfeb = Obey file)
 - Graphics files are type 0x004 (sprite files)
 
-## Key Discoveries
+## Key Discoveries (Confirmed via Disassembly)
 
 ### Format Overview
 - Magic: `TAFS` (4 bytes at offset 0)
@@ -23,45 +23,39 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 ### Directory Entry Structure (64 bytes each)
 | Offset | Size | Field |
 |--------|------|-------|
-| 0x00 | 4 | Data offset (+4 to block header) |
-| 0x04 | 4 | Type: 1=file, 2=dir, 0xFFFFFFFF=end |
-| 0x08 | 4 | RISC OS load address (filetype in bits 8-19) |
-| 0x0C | 4 | RISC OS exec address (timestamp) |
-| 0x10 | 4 | Uncompressed file size |
-| 0x14 | 4 | Flags (3 = Squash compressed) |
-| 0x18 | 24 | Filename (null-terminated) |
+| 0x00 | 4 | Type: 1=file, 2=dir, 0xFFFFFFFF=end |
+| 0x04 | 4 | RISC OS load address (filetype in bits 8-19) |
+| 0x08 | 4 | RISC OS exec address (timestamp) |
+| 0x0C | 4 | Uncompressed file size |
+| 0x10 | 4 | RISC OS file attributes |
+| 0x14 | 20 | Filename (null-terminated) |
+| 0x3B | 1 | Mode byte (2 = multi-block file) |
+| 0x3C | 4 | Data block position |
 
-### Compressed Data Block (12-byte header)
-- Bytes 0-3: Workspace size (not actual uncompressed size!)
-- Bytes 4-7: Flags (0x020001xx pattern)
-- Bytes 8-11: Compressed data size
-- Bytes 12+: LZW data (starts with `1F 9D 8C`)
+### Entry Validation (from disassembly)
+- Entry termination uses end markers (0xFFFFFFFF) AND max 16 entries per block (0x1b4c: cmp r4, 0x10)
+- No heuristic validation needed - format has explicit entry counts
 
-### Entry Location Algorithm
-- First collect ALL directory data_offsets globally
-- Each directory owns entries between its data_offset and next directory's data_offset
-- Scan at 16-byte intervals within bounded range
-- End markers (0xFFFFFFFF) don't terminate search - continue scanning for more blocks
+### Block Header Format
+- h0: `(compression_type << 24) | uncompressed_size`
+- Type 0: Raw data at +4
+- Type 1: HCT1/CompMod (not supported)
+- Type 2: Squash/LZW, compressed_size at h1, data at +8
 
-### Data Location Algorithm (IMPORTANT - "Shifted Index" Pattern)
+### Multi-Block Index (from disassembly at 0x2094)
+- 272 bytes total (0x110)
+- h0 byte 0: Loop counter (starts at 0)
+- h0 byte 1: Number of blocks
+- h1: Always 0
+- Block offsets at +0x10 (4 bytes each)
 
-**General pattern**: `data_offset` points to `prev_block_header + 4`. Skip past the previous block to find our data.
+### Mode Byte (from disassembly at 0x1fc8)
+- Only `== 2` check for multi-block; anything else is single-block
+- Located at entry offset 0x3B
 
-**Multi-block files have a "shifted index" pattern**:
-- Each multi-block file's index contains data for the PREVIOUS multi-block file, not itself
-- Example: LEVELS index at 0x20d00 contains JukeboxMod data; NiceDrums index contains LEVELS data
-- To find a multi-block file's data, skip past its prev_header to the NEXT file's index position
-
-**Marker blocks** (h0=144, h1=0):
-- Some files have a "marker" at their prev_header instead of actual data
-- These marker files have their data at the END of the region they skip over
-- JukeboxMod: marker, data at LEVELS' index position (skip-past finds it correctly)
-- ScrollText: marker, raw data after all Samples files
-- ReadME: marker, LZW data at very end of archive (after Ooh (Rev))
-
-**Data offset interpretations**:
-- `data_offset = 0x410`: First file in block, relative offset (header = entry + 0x410)
-- `data_offset != 0x410`: Absolute offset to prev_header + 4 (header = data_offset - 4)
+### Directory Block Table
+- Scans for `position == 0` (0x1b14: cmp r0, 0)
+- Count field used for index-based lookup (0x1ba8: ldm r8, {r0, r1})
 
 ## File Structure
 

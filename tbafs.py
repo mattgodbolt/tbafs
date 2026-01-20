@@ -36,6 +36,16 @@ ENTRY_TYPE_FILE = 1
 ENTRY_TYPE_DIR = 2
 ENTRY_TYPE_END = 0xFFFFFFFF
 
+# Entry scanning limits (from disassembly: cmp r4, 0x10 at 0x1b4c)
+MAX_ENTRIES_PER_BLOCK = 16
+
+# Multi-block index constants (from disassembly: 0x2094-0x20a4)
+MULTIBLOCK_INDEX_SIZE = 0x110  # 272 bytes read for index
+MULTIBLOCK_OFFSETS_START = 0x10  # Block offsets begin at index+0x10
+
+# Mode byte values (from disassembly: cmp r1, 2 at 0x1fc8)
+MODE_MULTIBLOCK = 2  # Mode byte == 2 means multi-block file
+
 
 # RISC OS filetype names for common types
 FILETYPES = {
@@ -318,16 +328,14 @@ class TBAFSArchive:
         )
 
     def _is_valid_entry(self, entry: DirEntry | None) -> bool:
-        """Check if an entry looks valid."""
-        if not entry or not entry.name:
+        """Check if an entry is valid (not end marker or null).
+
+        Entry validation is straightforward per disassembly - the format
+        provides explicit entry counts, so we just check the entry type.
+        """
+        if not entry:
             return False
-        if entry.entry_type not in (ENTRY_TYPE_FILE, ENTRY_TYPE_DIR):
-            return False
-        # RISC OS names start with alphanumeric, ! (apps), or _
-        if not (entry.name[0].isalnum() or entry.name[0] in "!_"):
-            return False
-        # Load address must have RISC OS dated file format (0xFFFtttxx)
-        return (entry.load_addr >> 20) == 0xFFF
+        return entry.entry_type in (ENTRY_TYPE_FILE, ENTRY_TYPE_DIR)
 
     def _get_dir_entry_blocks(self, entry: DirEntry) -> list[tuple[int, int]]:
         """
@@ -347,7 +355,10 @@ class TBAFSArchive:
         block_table = entry.data_position
         blocks: list[tuple[int, int]] = []
 
-        offset = 8  # Start after 8-byte header
+        # Directory block header: 8-byte header, then (position, count) pairs
+        # Module scans for position == 0 (0x1b14: cmp r0, 0)
+        # Count field is available for index-based lookup (0x1ba8: ldm r8, {r0, r1})
+        offset = 8  # Skip 8-byte header (h0=144, h1=0)
         while block_table + offset + 8 <= len(self.data):
             pos, count = struct.unpack(
                 "<2I", self.data[block_table + offset : block_table + offset + 8]
@@ -374,10 +385,14 @@ class TBAFSArchive:
             # Root directory: entry table offset comes from header[0x18]
             start_offset = self.header.entry_table_offset
 
-            # Collect root entries (fixed positions)
+            # Collect root entries using header count, with max 16 per block safety limit
+            # (from disassembly: cmp r4, 0x10 at 0x1b4c)
             root_entries = []
             offset = start_offset
-            while offset < len(self.data):
+            max_entries = min(self.header.entry_count, MAX_ENTRIES_PER_BLOCK)
+            for _ in range(max_entries):
+                if offset + ENTRY_SIZE > len(self.data):
+                    break
                 entry = self._parse_entry(offset, parent_path)
                 if entry is None or entry.is_end:
                     break
@@ -468,15 +483,21 @@ class TBAFSArchive:
 
         target_size = entry.size
         block_pos = entry.data_position
-        mode_byte = self.data[entry.offset + 0x3B] if entry.offset + 0x3B < len(self.data) else 0
+
+        # Read mode byte from entry offset 0x3B (per disassembly at 0x1fc0)
+        if entry.offset + 0x3B >= len(self.data):
+            raise TBAFSExtractionError(
+                f"Cannot read mode byte for {entry.full_path} at 0x{entry.offset:x}"
+            )
+        mode_byte = self.data[entry.offset + 0x3B]
 
         if block_pos < 0 or block_pos + 8 > len(self.data):
             raise TBAFSExtractionError(
                 f"Invalid block position 0x{block_pos:x} for {entry.full_path}"
             )
 
-        # Multi-block file (mode byte = 2)
-        if mode_byte == 2:
+        # Multi-block file (mode byte == 2, per disassembly at 0x1fc8)
+        if mode_byte == MODE_MULTIBLOCK:
             return self._read_multiblock(block_pos, target_size)
 
         # Single block file
@@ -485,19 +506,33 @@ class TBAFSArchive:
     def _read_multiblock(self, index_pos: int, target_size: int) -> bytes:
         """Read a multi-block file from its index.
 
-        Multi-block index format:
-        - h0 = num_blocks * 256 (e.g., 0x200 for 2 blocks, 0x600 for 6 blocks)
-        - h1 = 0
-        - Block offsets at +0x10, +0x14, +0x18, ...
+        Multi-block index format (from disassembly at 0x2094):
+        - Total size read: 272 bytes (0x110)
+        - h0 byte 0: Loop counter (starts at 0)
+        - h0 byte 1: Number of blocks
+        - h1: Always 0
+        - Bytes 4-15: Reserved (not accessed by module)
+        - +0x10: Block offset table (4 bytes per block)
+
+        The pattern h0 = num_blocks * 256 puts the block count in byte 1.
         """
         h0, h1 = struct.unpack("<2I", self.data[index_pos : index_pos + 8])
-        if h1 != 0 or h0 == 0 or h0 % 256 != 0:
+
+        # Validate: h1 must be 0, byte 0 of h0 is counter (should be 0 initially)
+        if h1 != 0:
             raise TBAFSExtractionError(
-                f"Invalid multi-block index at 0x{index_pos:x}: h0=0x{h0:x}, h1=0x{h1:x}"
+                f"Invalid multi-block index at 0x{index_pos:x}: h1=0x{h1:x} (expected 0)"
+            )
+        if h0 == 0:
+            raise TBAFSExtractionError(
+                f"Invalid multi-block index at 0x{index_pos:x}: h0=0 (no blocks)"
             )
 
+        # Block count is in byte 1: (h0 >> 8) & 0xFF when byte 0 is 0
+        # We don't need it since the loop reads until target_size or offset 0
+
         result = bytearray()
-        offset_pos = index_pos + 0x10
+        offset_pos = index_pos + MULTIBLOCK_OFFSETS_START
 
         while len(result) < target_size:
             if offset_pos + 4 > len(self.data):

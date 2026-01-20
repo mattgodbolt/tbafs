@@ -158,6 +158,11 @@ Large files (>32KB) are split into 32KB blocks with an index structure:
 | 0x08 | 8 | Reserved |
 | 0x10 | 4×N | Block offset table (each points to a compressed block) |
 
+The h0 field encodes the block count:
+- Byte 0: Loop counter (starts at 0, used by module during iteration)
+- Byte 1: Number of blocks
+- This gives the pattern h0 = num_blocks × 256 when byte 0 is 0
+
 Each block offset points to a standard compressed block (8-byte header). Decompress all blocks in order and concatenate. The final block may be smaller than 32KB.
 
 ## Key Constants
@@ -169,6 +174,8 @@ Each block offset points to a standard compressed block (8-byte header). Decompr
 | `ENTRY_SIZE` | 0x40 (64) | Size of each directory entry |
 | `BLOCK_ALIGNMENT` | 16 | Alignment boundary for entries and data blocks |
 | `LZW_BLOCK_SIZE` | 32768 | Maximum decompressed size per LZW block |
+| `MAX_ENTRIES_PER_BLOCK` | 16 | Maximum entries scanned per block (0x1b4c: cmp r4, 0x10) |
+| `MULTIBLOCK_INDEX_SIZE` | 0x110 (272) | Bytes read for multi-block index |
 
 ## Directory Structure
 
@@ -206,6 +213,8 @@ The header would contain: `[pos=0x247C0, count=18, pos=0x353F0, count=7, pos=0, 
 ## End Markers
 
 A type value of `0xFFFFFFFF` marks the end of entries in a contiguous block. When iterating entries using explicit counts from the directory block header, end markers can be ignored.
+
+The module also limits scanning to 16 entries per block (`cmp r4, 0x10` at 0x1b4c), providing a hard upper bound even if no end marker is present.
 
 ## Example: Parsing a TBAFS Archive
 
