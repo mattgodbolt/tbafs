@@ -158,7 +158,6 @@ class LZWDecompressor:
     def __init__(self, max_bits: int = LZW_MAX_BITS):
         self.max_bits = max_bits
         self.max_code = (1 << max_bits) - 1
-        self.clear_code = LZW_CLEAR_CODE
 
     def decompress(self, data: bytes) -> bytes:
         """Decompress LZW data."""
@@ -205,7 +204,7 @@ class LZWDecompressor:
             bits_in_buffer -= current_bits
 
             # Handle clear code
-            if block_mode and code == self.clear_code:
+            if block_mode and code == LZW_CLEAR_CODE:
                 dictionary = _create_initial_dictionary()
                 next_code = LZW_CLEAR_CODE + 1
                 current_bits = LZW_INITIAL_BITS
@@ -296,8 +295,8 @@ class TBAFSArchive:
         # Parse fields from correct offsets
         entry_type, load_addr, exec_addr, size, flags = ENTRY_STRUCT.unpack(entry_data[0x00:0x14])
 
-        # Extract null-terminated name from offset 0x14 (32 bytes max)
-        name_bytes = entry_data[0x14:0x34]
+        # Extract null-terminated name from offset 0x14 (20 bytes)
+        name_bytes = entry_data[0x14:0x28]
         null_pos = name_bytes.find(b"\x00")
         if null_pos != -1:
             name_bytes = name_bytes[:null_pos]
@@ -320,16 +319,14 @@ class TBAFSArchive:
 
     def _is_valid_entry(self, entry: DirEntry | None) -> bool:
         """Check if an entry looks valid."""
-        if not entry:
+        if not entry or not entry.name:
             return False
         if entry.entry_type not in (ENTRY_TYPE_FILE, ENTRY_TYPE_DIR):
             return False
-        if not entry.name or len(entry.name) < 1:
-            return False
-        # Name should start with alphanumeric or !
+        # RISC OS names start with alphanumeric, ! (apps), or _
         if not (entry.name[0].isalnum() or entry.name[0] in "!_"):
             return False
-        # Load address should be RISC OS format
+        # Load address must have RISC OS dated file format (0xFFFtttxx)
         return (entry.load_addr >> 20) == 0xFFF
 
     def _get_dir_entry_blocks(self, entry: DirEntry) -> list[tuple[int, int]]:
@@ -352,10 +349,9 @@ class TBAFSArchive:
 
         offset = 8  # Start after 8-byte header
         while block_table + offset + 8 <= len(self.data):
-            pos = struct.unpack("<I", self.data[block_table + offset : block_table + offset + 4])[0]
-            count = struct.unpack(
-                "<I", self.data[block_table + offset + 4 : block_table + offset + 8]
-            )[0]
+            pos, count = struct.unpack(
+                "<2I", self.data[block_table + offset : block_table + offset + 8]
+            )
             if pos == 0:
                 break
             blocks.append((pos, count))
@@ -418,6 +414,35 @@ class TBAFSArchive:
                 if entry.is_directory:
                     yield from self.iter_entries(entry, entry.full_path)
 
+    def _read_block(self, block_pos: int) -> bytes:
+        """Read and decompress a single data block.
+
+        Block header format:
+        - h0: (compression_type << 24) | uncompressed_size
+        - For type 2 (compressed): h1 = compressed_size, data at +8
+        - For type 0 (raw): data at +4
+
+        Returns the decompressed/raw block data.
+        """
+        h0 = struct.unpack("<I", self.data[block_pos : block_pos + 4])[0]
+        comp_type = (h0 >> 24) & 0xFF
+        uncomp_size = h0 & 0xFFFFFF
+
+        if comp_type == COMP_TYPE_SQUASH:
+            comp_size = struct.unpack("<I", self.data[block_pos + 4 : block_pos + 8])[0]
+            if comp_size <= 0 or block_pos + 8 + comp_size > len(self.data):
+                raise TBAFSExtractionError(
+                    f"Invalid compressed size {comp_size} at 0x{block_pos:x}"
+                )
+            lzw_data = self.data[block_pos + 8 : block_pos + 8 + comp_size]
+            return self.decompressor.decompress(lzw_data)
+        elif comp_type == COMP_TYPE_RAW:
+            return self.data[block_pos + 4 : block_pos + 4 + uncomp_size]
+        else:
+            raise TBAFSExtractionError(
+                f"Unsupported compression type {comp_type} at 0x{block_pos:x}"
+            )
+
     def read_file_data(self, entry: DirEntry) -> bytes:
         """Read and decompress file data for an entry.
 
@@ -452,36 +477,12 @@ class TBAFSArchive:
 
         # Multi-block file (mode byte = 2)
         if mode_byte == 2:
-            return self._read_multiblock_new(block_pos, target_size)
+            return self._read_multiblock(block_pos, target_size)
 
-        # Single block file - parse header (h0 always present, h1 only for compressed)
-        h0 = struct.unpack("<I", self.data[block_pos : block_pos + 4])[0]
-        comp_type = (h0 >> 24) & 0xFF
+        # Single block file
+        return self._read_block(block_pos)[:target_size]
 
-        if comp_type == COMP_TYPE_SQUASH:
-            # LZW compressed: 8-byte header, h1 = compressed size, data at +8
-            comp_size = struct.unpack("<I", self.data[block_pos + 4 : block_pos + 8])[0]
-            if comp_size <= 0 or block_pos + 8 + comp_size > len(self.data):
-                raise TBAFSExtractionError(
-                    f"Invalid compressed size {comp_size} for {entry.full_path}"
-                )
-            lzw_data = self.data[block_pos + 8 : block_pos + 8 + comp_size]
-            if lzw_data[:2] != LZW_MAGIC:
-                raise TBAFSExtractionError(
-                    f"Missing LZW magic at 0x{block_pos + 8:x} for {entry.full_path}"
-                )
-            return self.decompressor.decompress(lzw_data)[:target_size]
-
-        elif comp_type == COMP_TYPE_RAW:
-            # Raw/uncompressed: 4-byte header only, data at +4
-            return self.data[block_pos + 4 : block_pos + 4 + target_size]
-
-        else:
-            raise TBAFSExtractionError(
-                f"Unsupported compression type {comp_type} at 0x{block_pos:x} for {entry.full_path}"
-            )
-
-    def _read_multiblock_new(self, index_pos: int, target_size: int) -> bytes:
+    def _read_multiblock(self, index_pos: int, target_size: int) -> bytes:
         """Read a multi-block file from its index.
 
         Multi-block index format:
@@ -510,25 +511,7 @@ class TBAFSArchive:
                     f"Invalid block offset 0x{block_offset:x} in multi-block index"
                 )
 
-            # Parse block header - size depends on compression type
-            h0 = struct.unpack("<I", self.data[block_offset : block_offset + 4])[0]
-            comp_type = (h0 >> 24) & 0xFF
-            uncomp_size = h0 & 0xFFFFFF
-
-            if comp_type == COMP_TYPE_SQUASH:
-                # Compressed: 8-byte header (h0 + h1), data at +8
-                comp_size = struct.unpack("<I", self.data[block_offset + 4 : block_offset + 8])[0]
-                lzw_data = self.data[block_offset + 8 : block_offset + 8 + comp_size]
-                decompressed = self.decompressor.decompress(lzw_data)
-                result.extend(decompressed)
-            elif comp_type == COMP_TYPE_RAW:
-                # Raw: 4-byte header only, data at +4
-                result.extend(self.data[block_offset + 4 : block_offset + 4 + uncomp_size])
-            else:
-                raise TBAFSExtractionError(
-                    f"Unsupported compression type {comp_type} in multi-block"
-                )
-
+            result.extend(self._read_block(block_offset))
             offset_pos += 4
 
         return bytes(result[:target_size])
