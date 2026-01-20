@@ -1,13 +1,14 @@
 #!/bin/bash
 # Test script for TBAFS extractor
-# Extracts sample, compares against reference files, tests ADFS image creation
+# Extracts all sample archives, compares Blurp against reference, tests ADFS image creation
 set -e
 
+# Test Blurp extraction against known good reference
+echo "Testing Blurp.b21 extraction against reference..."
 rm -rf ./tmp/test_extract
 mkdir -p ./tmp/test_extract
 python3 tbafs.py extract samples/Blurp.b21 -o ./tmp/test_extract
 
-# Compare extracted files with reference
 echo ""
 echo "Comparing extracted files with reference..."
 DIFF_OUTPUT=$(diff -rq ./tmp/test_extract ./comparison/Blurp 2>&1)
@@ -19,9 +20,26 @@ else
     exit 1
 fi
 
-# Count files
 FILE_COUNT=$(find ./tmp/test_extract -type f | wc -l)
 echo "✓ Extracted $FILE_COUNT files"
+
+# Test all other archives extract without error
+echo ""
+echo "Testing extraction of all sample archives..."
+for archive in samples/*.b21; do
+    name=$(basename "$archive" .b21)
+    if [ "$name" = "Blurp" ]; then
+        continue  # Already tested above
+    fi
+    rm -rf "./tmp/$name"
+    if python3 tbafs.py extract "$archive" -o "./tmp/$name" > /dev/null 2>&1; then
+        count=$(find "./tmp/$name" -type f | wc -l)
+        echo "✓ $name.b21: extracted $count files"
+    else
+        echo "✗ $name.b21: extraction failed!"
+        exit 1
+    fi
+done
 
 # Test ADFS image creation
 echo ""
