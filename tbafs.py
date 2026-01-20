@@ -283,7 +283,7 @@ class TBAFSArchive:
             entry_count=entry_count,
         )
 
-    def _parse_entry(self, offset: int, parent_path: str = "") -> DirEntry | None:
+    def _parse_entry(self, offset: int, parent_path: str = "") -> DirEntry:
         """Parse a single directory entry at the given offset.
 
         Entry structure (64 bytes):
@@ -298,7 +298,10 @@ class TBAFSArchive:
         - 0x3c: data_position (4 bytes) - disk position for reading
         """
         if offset + ENTRY_SIZE > len(self.data):
-            return None
+            raise TBAFSExtractionError(
+                f"Entry at 0x{offset:x} extends beyond archive (need {ENTRY_SIZE} bytes, "
+                f"have {len(self.data) - offset})"
+            )
 
         entry_data = self.data[offset : offset + ENTRY_SIZE]
 
@@ -349,7 +352,7 @@ class TBAFSArchive:
         # Module scans for position == 0 (0x1b14: cmp r0, 0)
         # Count field is available for index-based lookup (0x1ba8: ldm r8, {r0, r1})
         offset = 8  # Skip 8-byte header (h0=144, h1=0)
-        while block_table + offset + 8 <= len(self.data):
+        while True:
             pos, count = struct.unpack(
                 "<2I", self.data[block_table + offset : block_table + offset + 8]
             )
@@ -381,10 +384,8 @@ class TBAFSArchive:
             offset = start_offset
             max_entries = min(self.header.entry_count, MAX_ENTRIES_PER_BLOCK)
             for _ in range(max_entries):
-                if offset + ENTRY_SIZE > len(self.data):
-                    break
                 entry = self._parse_entry(offset, parent_path)
-                if entry is None or entry.is_end:
+                if entry.is_end:
                     break
                 root_entries.append(entry)
                 offset += ENTRY_SIZE
@@ -404,11 +405,9 @@ class TBAFSArchive:
                 # Scan 'count' entries starting at block_pos
                 for i in range(count):
                     offset = block_pos + i * ENTRY_SIZE
-                    if offset + ENTRY_SIZE > len(self.data):
-                        break
                     entry = self._parse_entry(offset, parent_path)
-                    if entry is None or entry.is_end:
-                        continue
+                    if entry.is_end:
+                        break
                     entries.append(entry)
 
             # Yield entries and recurse into subdirectories
@@ -433,9 +432,10 @@ class TBAFSArchive:
 
         if comp_type == COMP_TYPE_SQUASH:
             comp_size = struct.unpack("<I", self.data[block_pos + 4 : block_pos + 8])[0]
-            if comp_size <= 0 or block_pos + 8 + comp_size > len(self.data):
+            if block_pos + 8 + comp_size > len(self.data):
                 raise TBAFSExtractionError(
-                    f"Invalid compressed size {comp_size} at 0x{block_pos:x}"
+                    f"Compressed block at 0x{block_pos:x} claims {comp_size} bytes "
+                    f"but only {len(self.data) - block_pos - 8} available"
                 )
             lzw_data = self.data[block_pos + 8 : block_pos + 8 + comp_size]
             return self.decompressor.decompress(lzw_data)
@@ -473,15 +473,11 @@ class TBAFSArchive:
         block_pos = entry.data_position
 
         # Read mode byte from entry offset 0x3B (per disassembly at 0x1fc0)
-        if entry.offset + 0x3B >= len(self.data):
-            raise TBAFSExtractionError(
-                f"Cannot read mode byte for {entry.full_path} at 0x{entry.offset:x}"
-            )
         mode_byte = self.data[entry.offset + 0x3B]
 
-        if block_pos < 0 or block_pos + 8 > len(self.data):
+        if block_pos + 8 > len(self.data):
             raise TBAFSExtractionError(
-                f"Invalid block position 0x{block_pos:x} for {entry.full_path}"
+                f"Block at 0x{block_pos:x} for {entry.full_path} extends beyond archive"
             )
 
         # Multi-block file (mode byte == 2, per disassembly at 0x1fc8)
@@ -523,17 +519,9 @@ class TBAFSArchive:
         offset_pos = index_pos + MULTIBLOCK_OFFSETS_START
 
         while len(result) < target_size:
-            if offset_pos + 4 > len(self.data):
-                break
-
             block_offset = struct.unpack("<I", self.data[offset_pos : offset_pos + 4])[0]
             if block_offset == 0:
                 break
-            if block_offset >= len(self.data):
-                raise TBAFSExtractionError(
-                    f"Invalid block offset 0x{block_offset:x} in multi-block index"
-                )
-
             result.extend(self._read_block(block_offset))
             offset_pos += 4
 
