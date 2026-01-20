@@ -419,7 +419,8 @@ class TBAFSArchive:
 
         Block header format:
         - h0: (compression_type << 24) | uncompressed_size
-        - For type 2 (compressed): h1 = compressed_size, data at +8
+        - For type 2 (Squash/LZW): h1 = compressed_size, data at +8
+        - For type 1 (HCT1/Huffman): not yet supported, raises error
         - For type 0 (raw): data at +4
 
         Returns the decompressed/raw block data.
@@ -437,6 +438,13 @@ class TBAFSArchive:
                 )
             lzw_data = self.data[block_pos + 8 : block_pos + 8 + comp_size]
             return self.decompressor.decompress(lzw_data)
+        elif comp_type == COMP_TYPE_HCT1:
+            raise TBAFSExtractionError(
+                f"HCT1 compression (type 1) at 0x{block_pos:x} is not yet supported. "
+                f"This Huffman-based format was identified in disassembly but no sample "
+                f"archives have been found. Please report this archive at "
+                f"https://github.com/mattgodbolt/tbafs/issues so we can implement support."
+            )
         elif comp_type == COMP_TYPE_RAW:
             return self.data[block_pos + 4 : block_pos + 4 + uncomp_size]
         else:
