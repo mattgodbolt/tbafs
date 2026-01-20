@@ -30,15 +30,11 @@ COMP_TYPE_RAW = 0  # Type 0: Uncompressed/raw data
 COMP_TYPE_HCT1 = 1  # Type 1: HCT1/CompMod compressed (not supported)
 COMP_TYPE_SQUASH = 2  # Type 2: Squash/LZW compressed
 LZW_INITIAL_BITS = 9
-MAX_COMPRESSED_SIZE = 500_000  # Sanity check limit for compressed block size
 
 # Entry type constants
 ENTRY_TYPE_FILE = 1
 ENTRY_TYPE_DIR = 2
 ENTRY_TYPE_END = 0xFFFFFFFF
-
-# Compression flags
-FLAGS_COMPRESSED = 3
 
 
 # RISC OS filetype names for common types
@@ -142,10 +138,6 @@ class DirEntry:
     @property
     def is_end(self) -> bool:
         return self.entry_type == ENTRY_TYPE_END
-
-    @property
-    def is_compressed(self) -> bool:
-        return self.flags == FLAGS_COMPRESSED
 
     @property
     def full_path(self) -> str:
@@ -260,9 +252,6 @@ class TBAFSArchive:
         self.data = file.read()
         self.header = self._parse_header()
         self.decompressor = LZWDecompressor()
-        # Cache for tracking sequential uncompressed extraction positions
-        # Maps group_start_offset -> current_position
-        self._uncompressed_stream_pos: dict[int, int] = {}
 
     def _parse_header(self) -> TBAFSHeader:
         """Parse the TBAFS header."""
@@ -343,34 +332,6 @@ class TBAFSArchive:
         # Load address should be RISC OS format
         return (entry.load_addr >> 20) == 0xFFF
 
-    def _find_all_entries_in_range(
-        self, start: int, end: int, parent_path: str = ""
-    ) -> list[DirEntry]:
-        """
-        Find ALL valid directory entries within a byte range.
-
-        Entries are 64 bytes each. Scan sequentially from start, stopping at
-        end marker or invalid entry.
-        """
-        entries = []
-        pos = start
-
-        while pos < end and pos + ENTRY_SIZE <= len(self.data):
-            entry = self._parse_entry(pos, parent_path)
-
-            if entry and entry.entry_type == ENTRY_TYPE_END:
-                # End marker - stop scanning this block
-                break
-
-            if self._is_valid_entry(entry) and entry is not None:
-                entries.append(entry)
-                pos += ENTRY_SIZE  # Move past this 64-byte entry
-            else:
-                # Invalid entry - stop scanning
-                break
-
-        return entries
-
     def _get_dir_entry_blocks(self, entry: DirEntry) -> list[tuple[int, int]]:
         """
         Get all entry block positions for a directory.
@@ -402,64 +363,20 @@ class TBAFSArchive:
 
         return blocks
 
-    def _get_dir_content_start(self, entry: DirEntry) -> int:
-        """
-        Get the absolute position where a directory's content starts.
-
-        Returns the position of the first entry block.
-        For directories with multiple entry blocks, use _get_dir_entry_blocks().
-        """
-        blocks = self._get_dir_entry_blocks(entry)
-        if blocks:
-            return blocks[0][0]
-        return entry.data_position  # Fallback
-
-    def _collect_all_directory_boundaries(self) -> list[int]:
-        """
-        Scan the archive to find all directory content_start positions.
-
-        Returns a sorted list of unique content_start positions for all directories.
-        These positions define the boundaries between directory entry blocks.
-
-        Entries are 64 bytes, starting at header.entry_table_offset.
-        """
-        content_starts: set[int] = set()
-
-        # Scan at 64-byte intervals from entry table start
-        pos = self.header.entry_table_offset
-        while pos < len(self.data) - ENTRY_SIZE:
-            entry = self._parse_entry(pos, "")
-            if entry and entry.entry_type == ENTRY_TYPE_DIR and self._is_valid_entry(entry):
-                content_start = self._get_dir_content_start(entry)
-                content_starts.add(content_start)
-            elif entry and entry.entry_type == ENTRY_TYPE_END:
-                # End marker - could be more entries elsewhere, continue scanning
-                pass
-            pos += ENTRY_SIZE
-
-        return sorted(content_starts)
-
     def iter_entries(
         self,
         dir_entry: DirEntry | None = None,
         parent_path: str = "",
-        global_boundaries: list[int] | None = None,
     ) -> Iterator[DirEntry]:
         """Iterate over all directory entries, recursively.
 
         Args:
             dir_entry: Directory entry to scan children of. None for root.
             parent_path: Path prefix for entries.
-            global_boundaries: Sorted list of all directory content positions.
         """
         if dir_entry is None:
             # Root directory: entry table offset comes from header[0x18]
             start_offset = self.header.entry_table_offset
-
-            # First pass: scan entire archive to find all directory content_start positions
-            # These define the boundaries between directory entry blocks
-            all_dir_offsets = self._collect_all_directory_boundaries()
-            all_dir_offsets.append(len(self.data))  # Add EOF as final boundary
 
             # Collect root entries (fixed positions)
             root_entries = []
@@ -476,7 +393,7 @@ class TBAFSArchive:
             for entry in root_entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(entry, entry.full_path, all_dir_offsets)
+                    yield from self.iter_entries(entry, entry.full_path)
         else:
             # Get all entry blocks for this directory
             entry_blocks = self._get_dir_entry_blocks(dir_entry)
@@ -499,7 +416,7 @@ class TBAFSArchive:
             for entry in entries:
                 yield entry
                 if entry.is_directory:
-                    yield from self.iter_entries(entry, entry.full_path, global_boundaries)
+                    yield from self.iter_entries(entry, entry.full_path)
 
     def read_file_data(self, entry: DirEntry) -> bytes:
         """Read and decompress file data for an entry.
@@ -537,14 +454,14 @@ class TBAFSArchive:
         if mode_byte == 2:
             return self._read_multiblock_new(block_pos, target_size)
 
-        # Single block file - parse 8-byte header
-        h0, h1 = struct.unpack("<2I", self.data[block_pos : block_pos + 8])
+        # Single block file - parse header (h0 always present, h1 only for compressed)
+        h0 = struct.unpack("<I", self.data[block_pos : block_pos + 4])[0]
         comp_type = (h0 >> 24) & 0xFF
 
         if comp_type == COMP_TYPE_SQUASH:
-            # LZW compressed: h1 = compressed size, data at +8
-            comp_size = h1
-            if comp_size <= 0 or comp_size > MAX_COMPRESSED_SIZE:
+            # LZW compressed: 8-byte header, h1 = compressed size, data at +8
+            comp_size = struct.unpack("<I", self.data[block_pos + 4 : block_pos + 8])[0]
+            if comp_size <= 0 or block_pos + 8 + comp_size > len(self.data):
                 raise TBAFSExtractionError(
                     f"Invalid compressed size {comp_size} for {entry.full_path}"
                 )
@@ -593,18 +510,20 @@ class TBAFSArchive:
                     f"Invalid block offset 0x{block_offset:x} in multi-block index"
                 )
 
-            # Parse block header (8 bytes)
-            h0, h1 = struct.unpack("<2I", self.data[block_offset : block_offset + 8])
+            # Parse block header - size depends on compression type
+            h0 = struct.unpack("<I", self.data[block_offset : block_offset + 4])[0]
             comp_type = (h0 >> 24) & 0xFF
             uncomp_size = h0 & 0xFFFFFF
-            comp_size = h1
 
             if comp_type == COMP_TYPE_SQUASH:
+                # Compressed: 8-byte header (h0 + h1), data at +8
+                comp_size = struct.unpack("<I", self.data[block_offset + 4 : block_offset + 8])[0]
                 lzw_data = self.data[block_offset + 8 : block_offset + 8 + comp_size]
                 decompressed = self.decompressor.decompress(lzw_data)
                 result.extend(decompressed)
             elif comp_type == COMP_TYPE_RAW:
-                result.extend(self.data[block_offset + 8 : block_offset + 8 + uncomp_size])
+                # Raw: 4-byte header only, data at +4
+                result.extend(self.data[block_offset + 4 : block_offset + 4 + uncomp_size])
             else:
                 raise TBAFSExtractionError(
                     f"Unsupported compression type {comp_type} in multi-block"
@@ -619,13 +538,12 @@ class TBAFSArchive:
         for entry in self.iter_entries():
             if entry.is_file:
                 ft = entry.filetype_name
-                comp = "C" if entry.is_compressed else " "
                 if verbose:
-                    print(f"{entry.size:8} {ft:8} {comp} {entry.full_path}")
+                    print(f"{entry.size:8} {ft:8} {entry.full_path}")
                 else:
                     print(entry.full_path)
             elif entry.is_directory and verbose:
-                print(f"{'<DIR>':8} {'':8}   {entry.full_path}/")
+                print(f"{'<DIR>':8} {'':8} {entry.full_path}/")
 
     def extract_all(self, output_dir: Path) -> None:
         """Extract all files to the output directory."""
