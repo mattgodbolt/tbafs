@@ -61,7 +61,7 @@ This project reverse-engineers the TBAFS archive format used by RISC OS computer
 
 ```
 tbafs/
-├── tbafs.py          # Main extractor (Python 3.10+)
+├── tbafs.py          # Main extractor (Python 3.9+)
 ├── adfs.py           # ADFS E format disc image creator
 ├── test.sh           # Reproducible test script (verifies MD5)
 ├── FORMAT.md         # Full format specification (TBAFS)
