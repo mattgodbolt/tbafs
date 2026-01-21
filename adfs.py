@@ -13,6 +13,8 @@ ADFS E format:
 - No boot block (floppies only)
 """
 
+from __future__ import annotations
+
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
