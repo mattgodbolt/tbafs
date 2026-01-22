@@ -7,7 +7,7 @@ set -e
 echo "Testing Blurp.b21 extraction against reference..."
 rm -rf ./tmp/test_extract
 mkdir -p ./tmp/test_extract
-python3 tbafs.py extract samples/Blurp.b21 -o ./tmp/test_extract
+python3 -W error tbafs.py extract samples/Blurp.b21 -o ./tmp/test_extract
 
 echo ""
 echo "Comparing extracted files with reference..."
@@ -32,7 +32,7 @@ for archive in samples/*.b21; do
         continue  # Already tested above
     fi
     rm -rf "./tmp/$name"
-    if python3 tbafs.py extract "$archive" -o "./tmp/$name" > /dev/null 2>&1; then
+    if python3 -W error tbafs.py extract "$archive" -o "./tmp/$name" > /dev/null 2>&1; then
         count=$(find "./tmp/$name" -type f | wc -l)
         echo "✓ $name.b21: extracted $count files"
     else
@@ -45,7 +45,7 @@ done
 echo ""
 echo "Testing ADFS image creation..."
 rm -f ./tmp/test.adf
-python3 tbafs.py extract samples/Blurp.b21 --adfs ./tmp/test.adf
+python3 -W error tbafs.py extract samples/Blurp.b21 --adfs ./tmp/test.adf
 
 # Verify ADFS image size (E format = 819200 bytes)
 # Note: avoid stat as it can hang on stale NFS mounts
