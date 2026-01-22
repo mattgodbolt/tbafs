@@ -11,7 +11,7 @@ TBAFS (TBA Filing System) was created by TBA Software as a high-performance arch
 Requires Python 3.9+. No external dependencies.
 
 ```bash
-git clone https://github.com/yourusername/tbafs.git
+git clone https://github.com/mattgodbolt/tbafs.git
 cd tbafs
 ```
 
