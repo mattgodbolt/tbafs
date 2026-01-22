@@ -109,7 +109,7 @@ def quin_to_datetime(quin: int) -> datetime.datetime | None:
     epoch = quin_to_epochtime(quin)
     if not epoch:
         return None
-    return datetime.datetime.utcfromtimestamp(epoch)
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
 
 
 @dataclass
